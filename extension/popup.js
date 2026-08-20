@@ -1,7 +1,7 @@
 const API = "http://127.0.0.1:41320";
 const $ = (id) => document.getElementById(id);
 
-const state = { enabled: true, token: "" };
+const state = { enabled: true };
 
 function renderToggle() {
   $("toggle").classList.toggle("on", state.enabled);
@@ -19,10 +19,8 @@ async function checkHealth() {
   }
 }
 
-chrome.storage.local.get({ enabled: true, token: "" }, (cfg) => {
+chrome.storage.local.get({ enabled: true }, (cfg) => {
   state.enabled = cfg.enabled;
-  state.token = cfg.token;
-  $("token").value = cfg.token;
   renderToggle();
 });
 
@@ -30,13 +28,6 @@ $("toggle").addEventListener("click", () => {
   state.enabled = !state.enabled;
   chrome.storage.local.set({ enabled: state.enabled });
   renderToggle();
-});
-
-$("save").addEventListener("click", () => {
-  state.token = $("token").value.trim();
-  chrome.storage.local.set({ token: state.token });
-  $("save").textContent = "已保存";
-  setTimeout(() => ($("save").textContent = "保存"), 1200);
 });
 
 checkHealth();

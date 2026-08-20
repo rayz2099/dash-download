@@ -1,9 +1,10 @@
 //! localhost REST + WS API: Chrome 扩展与 webview UI 共用的唯一入口 (ADR 0003).
-//! 仅绑定 127.0.0.1; 鉴权用静态 token (header `x-dd-token`, WS 用 query `?token=`).
+//! 仅绑定 127.0.0.1. 无配对 token: 浏览器 CSRF 靠 CORS 源白名单 + 自定义头 `x-dd-client`
+//! 强制预检; WS 校验 Origin. 对齐 NDM "app 在跑就能接管" 的交互.
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
@@ -11,13 +12,14 @@ use axum::{Json, Router};
 use dd_core::{AddTaskOptions, Engine, RequestContext};
 use serde::Deserialize;
 use serde_json::json;
-use std::collections::HashMap;
-use std::sync::Arc;
-use tower_http::cors::{Any, CorsLayer};
+use std::sync::{Arc, Mutex};
+use tower_http::cors::{AllowOrigin, CorsLayer};
+use tauri::Manager;
 
 pub struct ApiCtx {
     pub engine: Engine,
-    pub token: String,
+    /// setup 之后填入, 扩展接管时用来把主窗口拉到前台
+    pub app: Arc<Mutex<Option<tauri::AppHandle>>>,
 }
 
 struct ApiError(dd_core::CoreError);
@@ -41,24 +43,30 @@ impl From<dd_core::CoreError> for ApiError {
 
 pub async fn serve(ctx: Arc<ApiCtx>, port: u16) -> std::io::Result<()> {
     let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+        .allow_origin(AllowOrigin::predicate(|origin, _req| origin_ok(origin)))
+        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+        .allow_headers([
+            header::CONTENT_TYPE,
+            HeaderName::from_static("x-dd-client"),
+        ]);
 
     let authed = Router::new()
         .route("/api/tasks", get(list_tasks).post(add_task))
         .route("/api/tasks/{id}/pause", post(pause_task))
         .route("/api/tasks/{id}/resume", post(resume_task))
+        .route("/api/tasks/{id}/cancel", post(cancel_task))
         .route("/api/tasks/{id}/redownload", post(redownload_task))
+        .route("/api/tasks/{id}/connections", post(set_connections))
         .route("/api/tasks/{id}", delete(remove_task))
         .route("/api/pause-all", post(pause_all))
         .route("/api/resume-all", post(resume_all))
-        .layer(middleware::from_fn_with_state(ctx.clone(), check_token));
+        .route("/api/focus", post(focus_window))
+        .layer(middleware::from_fn(check_client));
 
     let app = Router::new()
-        // ping 不鉴权: 扩展配对前的健康检查
+        // ping 不要求自定义头: 扩展 popup 健康检查
         .route("/api/ping", get(ping))
-        // WS 在 handler 内部校验 query token (浏览器 WS 无法带自定义 header)
+        // WS 无法带自定义 header, 只在 handler 里校验 Origin
         .route("/api/ws", get(ws_handler))
         .merge(authed)
         .layer(cors)
@@ -68,19 +76,48 @@ pub async fn serve(ctx: Arc<ApiCtx>, port: u16) -> std::io::Result<()> {
     axum::serve(listener, app).await
 }
 
-async fn check_token(
-    State(ctx): State<Arc<ApiCtx>>,
-    headers: HeaderMap,
-    req: axum::extract::Request,
-    next: Next,
-) -> Response {
-    let ok = headers
-        .get("x-dd-token")
+/// 允许的浏览器 Origin: 本机 webview / vite / 任意 chrome 扩展.
+/// 恶意网页带自己的 Origin, 不在白名单, CORS 预检失败且中间件直接拒.
+fn origin_ok(origin: &HeaderValue) -> bool {
+    let Ok(s) = origin.to_str() else {
+        return false;
+    };
+    s.starts_with("chrome-extension://")
+        || s == "http://localhost:5173"
+        || s == "http://127.0.0.1:5173"
+        || s == "https://tauri.localhost"
+        || s == "http://tauri.localhost"
+        || s == "tauri://localhost"
+}
+
+fn origin_allowed(headers: &HeaderMap) -> bool {
+    match headers.get(header::ORIGIN) {
+        // curl / 本机工具不带 Origin, 放行; 浏览器跨站请求总会带
+        None => true,
+        Some(v) => origin_ok(v),
+    }
+}
+
+/// 控制面: Origin 白名单 + 强制 `x-dd-client`, 让浏览器无法发 simple request CSRF.
+async fn check_client(headers: HeaderMap, req: axum::extract::Request, next: Next) -> Response {
+    if !origin_allowed(&headers) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "origin 不允许" })),
+        )
+            .into_response();
+    }
+    let client_ok = headers
+        .get("x-dd-client")
         .and_then(|v| v.to_str().ok())
-        .map(|v| v == ctx.token)
+        .map(|v| !v.is_empty())
         .unwrap_or(false);
-    if !ok {
-        return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "token 无效" }))).into_response();
+    if !client_ok {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "缺少 x-dd-client" })),
+        )
+            .into_response();
     }
     next.run(req).await
 }
@@ -116,7 +153,9 @@ async fn add_task(
         queue_only: req.queue_only,
         ctx: RequestContext { headers: req.headers },
     };
-    Ok(Json(ctx.engine.add(&req.url, opts)?).into_response())
+    let task = ctx.engine.add(&req.url, opts)?;
+    show_main(&ctx);
+    Ok(Json(task).into_response())
 }
 
 async fn pause_task(
@@ -135,12 +174,50 @@ async fn resume_task(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+async fn cancel_task(
+    State(ctx): State<Arc<ApiCtx>>,
+    Path(id): Path<i64>,
+) -> Result<Response, ApiError> {
+    ctx.engine.cancel(id)?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
 async fn redownload_task(
     State(ctx): State<Arc<ApiCtx>>,
     Path(id): Path<i64>,
 ) -> Result<Response, ApiError> {
     ctx.engine.redownload(id)?;
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+#[derive(Deserialize)]
+struct ConnReq {
+    n: u32,
+}
+
+async fn set_connections(
+    State(ctx): State<Arc<ApiCtx>>,
+    Path(id): Path<i64>,
+    Json(req): Json<ConnReq>,
+) -> Result<Response, ApiError> {
+    ctx.engine.set_connections(id, req.n)?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn focus_window(State(ctx): State<Arc<ApiCtx>>) -> Response {
+    show_main(&ctx);
+    StatusCode::NO_CONTENT.into_response()
+}
+
+fn show_main(ctx: &ApiCtx) {
+    let app = ctx.app.lock().unwrap();
+    if let Some(app) = app.as_ref() {
+        if let Some(win) = app.get_webview_window("main") {
+            let _ = win.unminimize();
+            let _ = win.show();
+            let _ = win.set_focus();
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -170,11 +247,11 @@ async fn resume_all(State(ctx): State<Arc<ApiCtx>>) -> Result<Response, ApiError
 
 async fn ws_handler(
     State(ctx): State<Arc<ApiCtx>>,
-    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
-    if params.get("token") != Some(&ctx.token) {
-        return (StatusCode::UNAUTHORIZED, "token 无效").into_response();
+    if !origin_allowed(&headers) {
+        return (StatusCode::FORBIDDEN, "origin 不允许").into_response();
     }
     upgrade.on_upgrade(move |socket| ws_loop(socket, ctx))
 }

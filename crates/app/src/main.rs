@@ -6,7 +6,6 @@
 mod api;
 
 use dd_core::{Engine, EngineConfig};
-use rand::Rng;
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -20,7 +19,6 @@ const API_PORT: u16 = 41320;
 #[derive(Clone, Serialize)]
 struct Boot {
     port: u16,
-    token: String,
     default_dir: String,
     version: String,
 }
@@ -62,30 +60,9 @@ fn config_dir() -> PathBuf {
         .join("dash-download")
 }
 
-/// token 首次生成后持久化, app 与扩展凭它配对
-fn load_or_create_token(dir: &PathBuf) -> String {
-    let path = dir.join("token");
-    if let Ok(t) = std::fs::read_to_string(&path) {
-        let t = t.trim().to_string();
-        if !t.is_empty() {
-            return t;
-        }
-    }
-    let token: String = {
-        const CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
-        let mut rng = rand::thread_rng();
-        let body: String =
-            (0..32).map(|_| CHARS[rng.gen_range(0..CHARS.len())] as char).collect();
-        format!("dd_{body}")
-    };
-    let _ = std::fs::create_dir_all(dir);
-    let _ = std::fs::write(&path, &token);
-    token
-}
-
 fn main() {
     let cfg_dir = config_dir();
-    let token = load_or_create_token(&cfg_dir);
+    let _ = std::fs::create_dir_all(&cfg_dir);
     let download_dir = dirs::download_dir()
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join("Downloads"));
 
@@ -94,7 +71,12 @@ fn main() {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     let engine_cfg = EngineConfig::new(cfg_dir.join("tasks.sqlite"), download_dir.clone());
     let engine = rt.block_on(async { Engine::new(engine_cfg) }).expect("engine init");
-    let api_ctx = Arc::new(api::ApiCtx { engine, token: token.clone() });
+    let app_slot: Arc<std::sync::Mutex<Option<tauri::AppHandle>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    let api_ctx = Arc::new(api::ApiCtx {
+        engine,
+        app: app_slot.clone(),
+    });
     rt.spawn(async move {
         if let Err(e) = api::serve(api_ctx, API_PORT).await {
             eprintln!("API server 退出: {e}");
@@ -105,7 +87,6 @@ fn main() {
 
     let boot = Boot {
         port: API_PORT,
-        token,
         default_dir: download_dir.to_string_lossy().into_owned(),
         version: env!("CARGO_PKG_VERSION").to_string(),
     };
@@ -113,7 +94,10 @@ fn main() {
     tauri::Builder::default()
         .manage(boot)
         .invoke_handler(tauri::generate_handler![bootstrap, reveal, open_path])
-        .setup(|app| {
+        .setup({
+            let app_slot = app_slot.clone();
+            move |app| {
+            *app_slot.lock().unwrap() = Some(app.handle().clone());
             let show = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出 Dash Download", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show, &quit])?;
@@ -133,6 +117,7 @@ fn main() {
                 })
                 .build(app)?;
             Ok(())
+            }
         })
         .on_window_event(|window, event| {
             // 关窗 = 隐藏, 引擎继续跑; 真正退出走托盘菜单

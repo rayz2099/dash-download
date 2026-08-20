@@ -24,6 +24,7 @@ export interface TaskInfo {
   speed: number;
   error: string;
   segments: SegmentInfo[];
+  max_segments: number;
   created_at: number;
   completed_at: number | null;
 }
@@ -44,7 +45,6 @@ export type EngineEvent =
 
 export interface Boot {
   port: number;
-  token: string;
   default_dir: string;
   version: string;
 }
@@ -75,7 +75,7 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
   const resp = await fetch(`http://127.0.0.1:${b.port}${path}`, {
     method,
     headers: {
-      "x-dd-token": b.token,
+      "x-dd-client": "ui",
       ...(body !== undefined ? { "content-type": "application/json" } : {}),
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -91,8 +91,11 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
 export const addTask = (r: AddTaskReq) => req<TaskInfo>("POST", "/api/tasks", r);
 export const pauseTask = (id: number) => req<void>("POST", `/api/tasks/${id}/pause`);
 export const resumeTask = (id: number) => req<void>("POST", `/api/tasks/${id}/resume`);
+export const cancelTask = (id: number) => req<void>("POST", `/api/tasks/${id}/cancel`);
 export const redownloadTask = (id: number) => req<void>("POST", `/api/tasks/${id}/redownload`);
-export const removeTask = (id: number, deleteFile = false) =>
+export const setConnections = (id: number, n: number) =>
+  req<void>("POST", `/api/tasks/${id}/connections`, { n });
+export const removeTask = (id: number, deleteFile = true) =>
   req<void>("DELETE", `/api/tasks/${id}?delete_file=${deleteFile}`);
 export const pauseAll = () => req<void>("POST", "/api/pause-all");
 export const resumeAll = () => req<void>("POST", "/api/resume-all");
@@ -106,7 +109,7 @@ export function connectEvents(onEvent: (ev: EngineEvent) => void): () => void {
   const connect = () => {
     if (closed) return;
     const b = getBoot();
-    ws = new WebSocket(`ws://127.0.0.1:${b.port}/api/ws?token=${b.token}`);
+    ws = new WebSocket(`ws://127.0.0.1:${b.port}/api/ws`);
     ws.onmessage = (e) => {
       try {
         onEvent(JSON.parse(e.data as string) as EngineEvent);

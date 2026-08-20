@@ -2,16 +2,15 @@ import type { ComponentChildren, JSX } from "preact";
 import type { FileType } from "./util";
 
 interface IcoProps {
-  d?: string;
   size?: number;
-  children?: ComponentChildren;
+  children: ComponentChildren;
 }
 
-function Ico({ d, size = 16, children }: IcoProps): JSX.Element {
+// Lucide 24 网格, stroke 1.75: 侧栏/工具栏共用一套线型, 避免 16px 自制图标发糊发挤
+function Ico({ size = 18, children }: IcoProps): JSX.Element {
   return (
-    <svg width={size} height={size} viewBox="0 0 16 16" fill="none"
-      stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-      {d ? <path d={d} /> : null}
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
       {children}
     </svg>
   );
@@ -19,78 +18,164 @@ function Ico({ d, size = 16, children }: IcoProps): JSX.Element {
 
 type P = { size?: number };
 
-export const IcoPlus = (p: P) => <Ico {...p} d="M8 3.5v9M3.5 8h9" />;
-export const IcoPlay = (p: P) => <Ico {...p} d="M5.2 3.6l7 4.4-7 4.4z" />;
-export const IcoPause = (p: P) => <Ico {...p} d="M5.5 3.5v9M10.5 3.5v9" />;
-export const IcoTrash = (p: P) => <Ico {...p} d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.7 8h5.6l.7-8" />;
+export const IcoPlus = (p: P) => (
+  <Ico {...p}>
+    <path d="M5 12h14" />
+    <path d="M12 5v14" />
+  </Ico>
+);
+export const IcoPlay = (p: P) => (
+  <Ico {...p}>
+    <polygon points="6 3 20 12 6 21 6 3" />
+  </Ico>
+);
+export const IcoPause = (p: P) => (
+  <Ico {...p}>
+    <rect x="14" y="4" width="4" height="16" rx="1" />
+    <rect x="6" y="4" width="4" height="16" rx="1" />
+  </Ico>
+);
+export const IcoTrash = (p: P) => (
+  <Ico {...p}>
+    <path d="M3 6h18" />
+    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+    <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+    <line x1="10" x2="10" y1="11" y2="17" />
+    <line x1="14" x2="14" y1="11" y2="17" />
+  </Ico>
+);
 export const IcoGear = (p: P) => (
   <Ico {...p}>
-    <circle cx="8" cy="8" r="2.2" />
-    <path d="M8 1.8v1.7M8 12.5v1.7M1.8 8h1.7M12.5 8h1.7M3.6 3.6l1.2 1.2M11.2 11.2l1.2 1.2M12.4 3.6l-1.2 1.2M4.8 11.2l-1.2 1.2" />
+    <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+    <circle cx="12" cy="12" r="3" />
   </Ico>
 );
 export const IcoSearch = (p: P) => (
   <Ico {...p}>
-    <circle cx="7" cy="7" r="4" />
-    <path d="M10.2 10.2l3 3" />
+    <circle cx="11" cy="11" r="8" />
+    <path d="m21 21-4.3-4.3" />
   </Ico>
 );
-export const IcoFolder = (p: P) => <Ico {...p} d="M2 4.5c0-.6.4-1 1-1h3l1.5 1.8H13c.6 0 1 .4 1 1v6c0 .6-.4 1-1 1H3c-.6 0-1-.4-1-1z" />;
-export const IcoDown = (p: P) => <Ico {...p} d="M8 2.5v8M4.5 7l3.5 3.5L11.5 7M3 13.5h10" />;
+export const IcoFolder = (p: P) => (
+  <Ico {...p}>
+    <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
+  </Ico>
+);
+export const IcoDown = (p: P) => (
+  <Ico {...p}>
+    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+    <polyline points="7 10 12 15 17 10" />
+    <line x1="12" x2="12" y1="15" y2="3" />
+  </Ico>
+);
 export const IcoSun = (p: P) => (
   <Ico {...p}>
-    <circle cx="8" cy="8" r="3" />
-    <path d="M8 1.5v1.4M8 13.1v1.4M1.5 8h1.4M13.1 8h1.4M3.4 3.4l1 1M11.6 11.6l1 1M12.6 3.4l-1 1M4.4 11.6l-1 1" />
+    <circle cx="12" cy="12" r="4" />
+    <path d="M12 2v2" />
+    <path d="M12 20v2" />
+    <path d="m4.93 4.93 1.41 1.41" />
+    <path d="m17.66 17.66 1.41 1.41" />
+    <path d="M2 12h2" />
+    <path d="M20 12h2" />
+    <path d="m6.34 17.66-1.41 1.41" />
+    <path d="m19.07 4.93-1.41 1.41" />
   </Ico>
 );
-export const IcoMoon = (p: P) => <Ico {...p} d="M13 9.5A5.5 5.5 0 016.5 3a5.5 5.5 0 106.5 6.5z" />;
-export const IcoCheck = (p: P) => <Ico {...p} d="M3 8.5l3.2 3.2L13 5" />;
+export const IcoMoon = (p: P) => (
+  <Ico {...p}>
+    <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
+  </Ico>
+);
+export const IcoCheck = (p: P) => (
+  <Ico {...p}>
+    <circle cx="12" cy="12" r="10" />
+    <path d="m9 12 2 2 4-4" />
+  </Ico>
+);
 export const IcoAlert = (p: P) => (
   <Ico {...p}>
-    <path d="M8 2l6.5 11.5h-13z" />
-    <path d="M8 6.5v3M8 11.8v.2" />
+    <circle cx="12" cy="12" r="10" />
+    <line x1="12" x2="12" y1="8" y2="12" />
+    <line x1="12" x2="12.01" y1="16" y2="16" />
   </Ico>
 );
 export const IcoCopy = (p: P) => (
   <Ico {...p}>
-    <rect x="5.5" y="5.5" width="8" height="8" rx="1.2" />
-    <path d="M10.5 5.5v-2c0-.6-.4-1-1-1h-6c-.6 0-1 .4-1 1v6c0 .6.4 1 1 1h2" />
+    <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
+    <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
   </Ico>
 );
-export const IcoQueue = (p: P) => <Ico {...p} d="M3 4.5h10M3 8h10M3 11.5h6" />;
-export const IcoX = (p: P) => <Ico {...p} d="M4 4l8 8M12 4l-8 8" />;
+export const IcoQueue = (p: P) => (
+  <Ico {...p}>
+    <path d="M8 6h13" />
+    <path d="M8 12h13" />
+    <path d="M8 18h13" />
+    <path d="M3 6h.01" />
+    <path d="M3 12h.01" />
+    <path d="M3 18h.01" />
+  </Ico>
+);
+export const IcoClock = (p: P) => (
+  <Ico {...p}>
+    <circle cx="12" cy="12" r="10" />
+    <polyline points="12 6 12 12 16 14" />
+  </Ico>
+);
+export const IcoX = (p: P) => (
+  <Ico {...p}>
+    <path d="M18 6 6 18" />
+    <path d="m6 6 12 12" />
+  </Ico>
+);
 export const IcoFilm = (p: P) => (
   <Ico {...p}>
-    <rect x="2" y="3.5" width="12" height="9" rx="1.2" />
-    <path d="M4.8 3.5v9M11.2 3.5v9M2 6.5h2.8M2 9.5h2.8M11.2 6.5H14M11.2 9.5H14" />
+    <rect width="18" height="18" x="3" y="3" rx="2" />
+    <path d="M7 3v18" />
+    <path d="M3 7.5h4" />
+    <path d="M3 12h18" />
+    <path d="M3 16.5h4" />
+    <path d="M17 3v18" />
+    <path d="M17 7.5h4" />
+    <path d="M17 16.5h4" />
   </Ico>
 );
 export const IcoDoc = (p: P) => (
   <Ico {...p}>
-    <path d="M4 2.5h5.5L12.5 5v8.5a1 1 0 01-1 1h-7.5a1 1 0 01-1-1v-10a1 1 0 011-1z" />
-    <path d="M9.5 2.5V5h3M6 8.5h4M6 11h4" />
+    <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" />
+    <path d="M14 2v4a2 2 0 0 0 2 2h4" />
+    <path d="M10 9H8" />
+    <path d="M16 13H8" />
+    <path d="M16 17H8" />
   </Ico>
 );
 export const IcoBox = (p: P) => (
   <Ico {...p}>
-    <path d="M2.5 5L8 2.5 13.5 5v6L8 13.5 2.5 11z" />
-    <path d="M2.5 5L8 7.5 13.5 5M8 7.5v6" />
+    <rect width="20" height="5" x="2" y="3" rx="1" />
+    <path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8" />
+    <path d="M10 12h4" />
   </Ico>
 );
 export const IcoApp = (p: P) => (
   <Ico {...p}>
-    <rect x="2.5" y="2.5" width="11" height="11" rx="2.5" />
-    <path d="M5.5 8l1.8 1.8 3.2-3.6" />
+    <rect width="20" height="16" x="2" y="4" rx="2" />
+    <path d="M2 8h20" />
+    <path d="M6 4v4" />
+    <path d="M10 4v4" />
   </Ico>
 );
 export const IcoMusic = (p: P) => (
   <Ico {...p}>
-    <path d="M6 12.5V4l7-1.5V11" />
-    <circle cx="4.3" cy="12.5" r="1.7" />
-    <circle cx="11.3" cy="11" r="1.7" />
+    <path d="M9 18V5l12-2v13" />
+    <circle cx="6" cy="18" r="3" />
+    <circle cx="18" cy="16" r="3" />
   </Ico>
 );
-export const IcoFile = (p: P) => <Ico {...p} d="M4 2.5h5.5L12.5 5v8.5a1 1 0 01-1 1h-7.5a1 1 0 01-1-1v-10a1 1 0 011-1zM9.5 2.5V5h3" />;
+export const IcoFile = (p: P) => (
+  <Ico {...p}>
+    <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" />
+    <path d="M14 2v4a2 2 0 0 0 2 2h4" />
+  </Ico>
+);
 
 export function TypeIcon({ type, size = 16 }: { type: FileType; size?: number }): JSX.Element {
   switch (type) {

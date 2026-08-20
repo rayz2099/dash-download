@@ -42,6 +42,11 @@ impl Store {
                 PRIMARY KEY (task_id, idx)
             );",
         )?;
+        // 已有库补列: 已存在时 ALTER 失败, 忽略即可
+        let _ = conn.execute(
+            "ALTER TABLE task ADD COLUMN max_segments INTEGER NOT NULL DEFAULT 8",
+            [],
+        );
         Ok(Store { conn })
     }
 
@@ -61,14 +66,31 @@ impl Store {
         name: &str,
         state: TaskState,
         ctx: &RequestContext,
+        max_segments: u32,
     ) -> Result<i64> {
         let now = now_ts();
         self.conn.execute(
-            "INSERT INTO task (url, final_url, name, dir, state, headers_json, created_at)
-             VALUES (?1, ?1, ?2, ?3, ?4, ?5, ?6)",
-            params![url, name, dir, state.as_str(), serde_json::to_string(&ctx.headers).unwrap_or_else(|_| "[]".into()), now],
+            "INSERT INTO task (url, final_url, name, dir, state, headers_json, created_at, max_segments)
+             VALUES (?1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                url,
+                name,
+                dir,
+                state.as_str(),
+                serde_json::to_string(&ctx.headers).unwrap_or_else(|_| "[]".into()),
+                now,
+                max_segments
+            ],
         )?;
         Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn set_max_segments(&self, id: i64, n: u32) -> Result<()> {
+        self.conn.execute(
+            "UPDATE task SET max_segments = ?2 WHERE id = ?1",
+            params![id, n],
+        )?;
+        Ok(())
     }
 
     pub fn update_probe(
@@ -169,7 +191,7 @@ impl Store {
     fn query_tasks(&self, id: Option<i64>) -> Result<Vec<TaskInfo>> {
         let sql = format!(
             "SELECT id, url, final_url, name, dir, size, resumable, state, done, error,
-                    headers_json, created_at, completed_at
+                    headers_json, created_at, completed_at, max_segments
              FROM task {} ORDER BY id DESC",
             if id.is_some() { "WHERE id = ?1" } else { "" }
         );
@@ -190,6 +212,7 @@ impl Store {
                 segments: Vec::new(),
                 created_at: row.get(11)?,
                 completed_at: row.get(12)?,
+                max_segments: row.get::<_, i64>(13).unwrap_or(8) as u32,
             })
         };
         let mut tasks: Vec<TaskInfo> = if let Some(id) = id {

@@ -1,18 +1,37 @@
-// Takeover: 拦截浏览器下载并转交 app 核心 (携带 Request Context, 见 CONTEXT.md)
+// Takeover: 拦截必须先于 Chrome 画出下载气泡; 先 cancel/erase 再交给 app.
 const API = "http://127.0.0.1:41320";
-const MIN_SIZE = 1024 * 1024; // 已知大小 < 1MB 不接管, 不值得走多连接
+const MIN_SIZE = 1024 * 1024;
 
-const DEFAULTS = { enabled: true, token: "" };
+const DEFAULTS = { enabled: true };
+let cached = { ...DEFAULTS };
+const inflight = new Set();
 
-async function settings() {
-  return new Promise((resolve) => chrome.storage.local.get(DEFAULTS, resolve));
+chrome.storage.local.get(DEFAULTS, (cfg) => {
+  cached = { enabled: cfg.enabled };
+  applyDownloadUi();
+});
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== "local") return;
+  if (changes.enabled) cached.enabled = changes.enabled.newValue;
+  applyDownloadUi();
+});
+
+function applyDownloadUi() {
+  // 关掉原生下载气泡/shelf, 否则 cancel 也来不及挡住 (需要 downloads.ui)
+  const enabled = !cached.enabled;
+  const opts = { enabled };
+  if (chrome.downloads.setUiOptions) {
+    chrome.downloads.setUiOptions(opts).catch(() => {});
+  } else if (chrome.downloads.setShelfEnabled) {
+    chrome.downloads.setShelfEnabled(enabled);
+  }
 }
 
-async function api(path, opts, token) {
+async function api(path, opts) {
   const resp = await fetch(API + path, {
     ...opts,
     headers: {
-      "x-dd-token": token,
+      "x-dd-client": "ext",
       ...(opts && opts.body ? { "content-type": "application/json" } : {}),
     },
   });
@@ -20,8 +39,6 @@ async function api(path, opts, token) {
   return resp.json().catch(() => null);
 }
 
-/// 组装 Request Context: cookies 从浏览器取, referer/UA 一并带走,
-/// 否则站点的鉴权下载在 app 侧会 403
 async function buildHeaders(url, referrer) {
   const headers = [];
   try {
@@ -42,47 +59,56 @@ function basename(path) {
   return name || undefined;
 }
 
-async function sendToApp(url, { referrer, filename } = {}) {
-  const cfg = await settings();
-  if (!cfg.token) throw new Error("未配置 token");
-  const headers = await buildHeaders(url, referrer);
-  return api("/api/tasks", {
+function shouldTakeover(item) {
+  const url = item.finalUrl || item.url || "";
+  if (!/^https?:\/\//i.test(url)) return false;
+  if (item.fileSize > 0 && item.fileSize < MIN_SIZE) return false;
+  if ((item.mime || "").startsWith("text/html")) return false;
+  return true;
+}
+
+function abortChrome(id) {
+  try { chrome.downloads.cancel(id); } catch (_) { /* 可能已取消 */ }
+  try { chrome.downloads.erase({ id }); } catch (_) { /* ignore */ }
+}
+
+async function sendToApp(url, extra) {
+  const headers = await buildHeaders(url, extra && extra.referrer);
+  const task = await api("/api/tasks", {
     method: "POST",
-    body: JSON.stringify({ url, name: filename, headers }),
-  }, cfg.token);
-}
-
-function notify(title, message) {
-  chrome.notifications.create({
-    type: "basic",
-    iconUrl: "icons/128.png",
-    title,
-    message,
+    body: JSON.stringify({
+      url,
+      name: extra && extra.filename,
+      headers,
+    }),
   });
+  // 拉起主窗口, 失败不阻断接管
+  api("/api/focus", { method: "POST" }).catch(() => {});
+  return task;
 }
 
-// ── 下载接管 ──
-chrome.downloads.onCreated.addListener(async (item) => {
-  const cfg = await settings();
-  if (!cfg.enabled || !cfg.token) return;
-
+function takeover(item) {
   const url = item.finalUrl || item.url;
-  if (!/^https?:\/\//i.test(url)) return;
-  if (item.fileSize > 0 && item.fileSize < MIN_SIZE) return;
-  if ((item.mime || "").startsWith("text/html")) return;
+  if (!cached.enabled) return;
+  if (!shouldTakeover(item)) return;
+  if (inflight.has(item.id) || inflight.has(url)) return;
+  inflight.add(item.id);
+  inflight.add(url);
+  setTimeout(() => { inflight.delete(item.id); inflight.delete(url); }, 8000);
 
-  try {
-    await sendToApp(url, { referrer: item.referrer, filename: basename(item.filename) });
-    // 先确认 app 已受理, 再取消浏览器下载, 失败则不打扰原下载
-    await chrome.downloads.cancel(item.id);
-    chrome.downloads.erase({ id: item.id });
-    notify("Dash Download 已接管", basename(item.filename) || url);
-  } catch (e) {
-    console.warn("接管失败, 保留浏览器下载:", e);
-  }
+  abortChrome(item.id);
+  sendToApp(url, { referrer: item.referrer, filename: basename(item.filename) })
+    .catch((e) => console.warn("接管失败:", e));
+}
+
+chrome.downloads.onCreated.addListener((item) => takeover(item));
+
+chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
+  // suggest 必须同步调用, 否则 Chrome 会卡住下载对话框
+  suggest();
+  takeover(item);
 });
 
-// ── 右键菜单 ──
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.create({
     id: "dd-download-link",
@@ -95,8 +121,12 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (info.menuItemId !== "dd-download-link" || !info.linkUrl) return;
   try {
     await sendToApp(info.linkUrl, { referrer: tab && tab.url });
-    notify("已发送到 Dash Download", info.linkUrl);
   } catch (e) {
-    notify("发送失败", String(e && e.message ? e.message : e));
+    chrome.notifications.create({
+      type: "basic",
+      iconUrl: "icons/128.png",
+      title: "发送失败",
+      message: String(e && e.message ? e.message : e),
+    });
   }
 });

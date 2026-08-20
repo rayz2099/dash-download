@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "Dash Download",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "接管浏览器下载, 转发给 Dash Download 进行多连接加速下载",
-  "permissions": ["downloads", "storage", "contextMenus", "cookies", "notifications"],
+  "permissions": ["downloads", "downloads.ui", "storage", "contextMenus", "cookies", "notifications"],
   "host_permissions": ["http://127.0.0.1:41320/*", "<all_urls>"],
   "background": {
     "service_worker": "background.js"

@@ -12,7 +12,6 @@ dd-core = { path = "../core" }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-rand.workspace = true
 tauri = { version = "2", features = ["tray-icon"] }
 axum = { version = "0.8", features = ["ws"] }
 tower-http = { version = "0.6", features = ["cors"] }

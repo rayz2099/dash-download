@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 /// Task 生命周期状态. 转移见 docs/adr 与 runner:
-/// Queued → Probing → Active ⇄ Paused; 终态 Completed/Failed/Canceled.
+/// Queued → Probing → Active ⇄ Paused; Completed/Failed 为终态.
+/// Canceled 停跑但保留断点, Resume 回到 Queued.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskState {
@@ -87,6 +88,8 @@ pub struct TaskInfo {
     pub speed: u64,
     pub error: String,
     pub segments: Vec<SegmentInfo>,
+    /// 该 Task 的最大连接数, 规划分段时使用
+    pub max_segments: u32,
     pub created_at: i64,
     pub completed_at: Option<i64>,
 }

@@ -25,7 +25,7 @@ justfile 已挂 `macos-arm` / `linux-x86` / `windows-x86`, 但 Linux/Windows 的
 - Linux x86_64: deb 包, 托盘与文件管理器 (xdg-open)
 - Windows x86_64: NSIS 安装包, 托盘, 资源管理器定位
 - macOS 公证 (notarization), 否则 Gatekeeper 会拦
-- 扩展商店包与 token 配对引导打磨
+- 扩展商店包
 
 ## v1.0 — 浏览器闭环
 

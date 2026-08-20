@@ -35,6 +35,54 @@ pub(crate) fn plan_segments(size: u64, max_n: u32, min_size: u64) -> Vec<Segment
         .collect()
 }
 
+/// 把尚未下完的连续空洞按新连接数切开; 每段必须是文件上的连续区间 (pwrite 不能跨洞).
+pub(crate) fn replan_remaining(
+    segs: &[SegmentInfo],
+    max_n: u32,
+    min_size: u64,
+) -> Vec<SegmentInfo> {
+    let mut holes: Vec<(u64, u64)> = segs
+        .iter()
+        .filter(|s| s.end > s.start + s.done)
+        .map(|s| (s.start + s.done, s.end))
+        .collect();
+    holes.sort_by_key(|h| h.0);
+    let mut merged: Vec<(u64, u64)> = Vec::new();
+    for (s, e) in holes {
+        match merged.last_mut() {
+            Some((_, end)) if s <= *end => *end = (*end).max(e),
+            _ => merged.push((s, e)),
+        }
+    }
+    if merged.is_empty() {
+        return segs.to_vec();
+    }
+    let target = max_n.max(1) as usize;
+    while merged.len() < target {
+        let (i, len) = match merged
+            .iter()
+            .enumerate()
+            .map(|(i, (s, e))| (i, e.saturating_sub(*s)))
+            .max_by_key(|(_, l)| *l)
+        {
+            Some(v) => v,
+            None => break,
+        };
+        if len < min_size.saturating_mul(2) {
+            break;
+        }
+        let mid = merged[i].0 + len / 2;
+        let (s, e) = merged[i];
+        merged[i] = (s, mid);
+        merged.insert(i + 1, (mid, e));
+    }
+    merged
+        .into_iter()
+        .enumerate()
+        .map(|(i, (start, end))| SegmentInfo { idx: i as u32, start, end, done: 0 })
+        .collect()
+}
+
 fn apply_ctx(mut req: reqwest::RequestBuilder, ctx: &RequestContext) -> reqwest::RequestBuilder {
     for (k, v) in &ctx.headers {
         req = req.header(k.as_str(), v.as_str());

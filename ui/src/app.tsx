@@ -7,17 +7,17 @@ import {
 } from "./util";
 import type { FileType } from "./util";
 import {
-  IcoAlert, IcoCheck, IcoCopy, IcoDown, IcoFolder, IcoGear, IcoMoon, IcoPause,
+  IcoAlert, IcoCheck, IcoClock, IcoDown, IcoGear, IcoMoon, IcoPause,
   IcoPlay, IcoPlus, IcoQueue, IcoSearch, IcoSun, IcoTrash, IcoX, TypeIcon,
 } from "./icons";
 
 type Filter = "all" | "active" | "queued" | "completed" | "failed" | `type:${FileType}`;
-type SortKey = "name" | "size" | "state" | "speed" | "time";
+type SortKey = "name" | "size" | "state" | "speed" | "created" | "time";
 
 const SIDE_STATES: { key: Filter; label: string; icon: (p: { size?: number }) => JSX.Element }[] = [
   { key: "all", label: "全部", icon: IcoQueue },
   { key: "active", label: "下载中", icon: IcoDown },
-  { key: "queued", label: "等待中", icon: IcoQueue },
+  { key: "queued", label: "等待中", icon: IcoClock },
   { key: "completed", label: "已完成", icon: IcoCheck },
   { key: "failed", label: "失败", icon: IcoAlert },
 ];
@@ -46,7 +46,7 @@ export function App() {
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState<number | null>(null);
-  const [detailOpen, setDetailOpen] = useState(false);
+  const [progressId, setProgressId] = useState<number | null>(null);
   const [menu, setMenu] = useState<CtxMenu | null>(null);
   const [sort, setSort] = useState<{ key: SortKey; asc: boolean }>({ key: "time", asc: false });
   const [showNew, setShowNew] = useState(false);
@@ -70,6 +70,9 @@ export function App() {
               break;
             case "task_added":
               setTasks((p) => [ev.task, ...p.filter((t) => t.id !== ev.task.id)]);
+              setSelectedId(ev.task.id);
+              setMenu(null);
+              setProgressId(ev.task.id);
               break;
             case "task_updated":
               setTasks((p) => p.map((t) => (t.id === ev.task.id ? ev.task : t)));
@@ -98,16 +101,33 @@ export function App() {
     return () => dispose?.();
   }, []);
 
-  // 右键菜单: 点击任意处 / Escape 关闭
+  // Escape 关掉最上层: 菜单 → 新建页 → 设置页 → 详情栏
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (menu) { setMenu(null); return; }
+      if (showNew) { setShowNew(false); return; }
+      if (showSettings) { setShowSettings(false); return; }
+      if (progressId != null) setProgressId(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [menu, showNew, showSettings, progressId]);
+
   useEffect(() => {
     if (!menu) return;
-    const close = () => setMenu(null);
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && close();
-    window.addEventListener("click", close);
-    window.addEventListener("keydown", onKey);
+    const onPtr = (e: PointerEvent) => {
+      const el = (e.target as HTMLElement | null)?.closest?.(".ctx-menu");
+      if (el) return;
+      setMenu(null);
+    };
+    // 下一帧再听: 否则本次右键的 pointerup 会立刻把刚打开的菜单关掉
+    const id = requestAnimationFrame(() => {
+      window.addEventListener("pointerdown", onPtr, true);
+    });
     return () => {
-      window.removeEventListener("click", close);
-      window.removeEventListener("keydown", onKey);
+      cancelAnimationFrame(id);
+      window.removeEventListener("pointerdown", onPtr, true);
     };
   }, [menu]);
 
@@ -124,6 +144,7 @@ export function App() {
         case "size": return dir * ((a.size ?? 0) - (b.size ?? 0));
         case "state": return dir * a.state.localeCompare(b.state);
         case "speed": return dir * (a.speed - b.speed);
+        case "created": return dir * (a.created_at - b.created_at);
         default: return dir * (lastTry(a) - lastTry(b));
       }
     });
@@ -159,14 +180,17 @@ export function App() {
     { key: "name", label: "文件名" },
     { key: "size", label: "大小" },
     { key: "state", label: "状态" },
-    { key: "speed", label: "带宽" },
-    { key: null, label: "剩余时间" },
+    { key: "created", label: "创建时间" },
     { key: "time", label: "最后尝试" },
   ];
 
   return (
     <div class="app-window">
       <div class="sidebar">
+        <div class="brand">
+          <span class="brand-mark"><IcoDown size={16} /></span>
+          <span class="brand-name">Dash Download</span>
+        </div>
         <div class="side-group">
           <div class="side-title">下载</div>
           {SIDE_STATES.map((s) => {
@@ -176,8 +200,9 @@ export function App() {
                 ? tasks.filter((t) => ["active", "probing", "paused"].includes(t.state)).length
                 : tasks.filter((t) => t.state === s.key).length;
             return (
-              <div class={"side-item" + (filter === s.key ? " on" : "")} onClick={() => setFilter(s.key)}>
-                <span class="side-ico"><s.icon size={14} /></span>
+              <div class={"side-item" + (!showSettings && !showNew && filter === s.key ? " on" : "")}
+                onClick={() => { setShowSettings(false); setShowNew(false); setFilter(s.key); }}>
+                <span class="side-ico"><s.icon size={18} /></span>
                 <span class="side-label">{s.label}</span>
                 <span class="side-count">{count || ""}</span>
               </div>
@@ -189,9 +214,9 @@ export function App() {
           {FILE_TYPES.map((ft) => {
             const count = tasks.filter((t) => fileType(t.name) === ft).length;
             return (
-              <div class={"side-item" + (filter === `type:${ft}` ? " on" : "")}
-                onClick={() => setFilter(`type:${ft}` as Filter)}>
-                <span class="side-ico"><TypeIcon type={ft} size={14} /></span>
+              <div class={"side-item" + (!showSettings && !showNew && filter === `type:${ft}` ? " on" : "")}
+                onClick={() => { setShowSettings(false); setShowNew(false); setFilter(`type:${ft}` as Filter); }}>
+                <span class="side-ico"><TypeIcon type={ft} size={18} /></span>
                 <span class="side-label">{TYPE_LABEL[ft]}</span>
                 <span class="side-count">{count || ""}</span>
               </div>
@@ -203,92 +228,109 @@ export function App() {
             {globalSpeed > 0 ? fmtSpeed(globalSpeed).split(" ")[0] : "0"}
             <small>{globalSpeed > 0 ? fmtSpeed(globalSpeed).split(" ")[1] + " 总速度" : "空闲"}</small>
           </div>
-          <div class="ext-pill" style={{ justifyContent: "space-between" }}>
-            <span style={{ display: "flex", alignItems: "center", gap: 7 }}>
-              <span class={"ext-dot" + (boot ? "" : " off")}></span>
-              {boot ? `核心运行中 v${boot.version}` : "连接中…"}
-            </span>
-            <button class="icon-btn" style={{ width: 24, height: 24 }} title="设置"
-              onClick={() => setShowSettings(true)}>
-              <IcoGear size={14} />
-            </button>
+          <div class="ext-pill">
+            <span class={"ext-dot" + (boot ? "" : " off")}></span>
+            {boot ? `核心运行中 v${boot.version}` : "连接中…"}
+          </div>
+          <div class={"side-item" + (showSettings ? " on" : "")}
+            onClick={() => { setShowSettings(true); setShowNew(false); setMenu(null); }}>
+            <span class="side-ico"><IcoGear size={18} /></span>
+            <span class="side-label">设置</span>
           </div>
         </div>
       </div>
 
-      <div class="main">
-        <div class="toolbar">
-          <span class="tb-title">{filterTitle}</span>
-          <span class="tb-sub">{visible.length} 项</span>
-          <button class="btn primary" style={{ marginLeft: 10 }} onClick={() => setShowNew(true)}>
-            <IcoPlus size={13} /> 新建下载
-          </button>
-          <button class="btn" disabled={!selected || selected.state === "completed" || isRunning(selected) || selected.state === "queued"}
-            onClick={() => selected && api.resumeTask(selected.id).catch(console.error)}>
-            <IcoPlay size={13} /> 继续
-          </button>
-          <button class="btn" disabled={!selected || !(isRunning(selected) || selected.state === "queued")}
-            onClick={() => selected && api.pauseTask(selected.id).catch(console.error)}>
-            <IcoPause size={13} /> 暂停
-          </button>
-          <button class="btn" disabled={!selected}
-            onClick={() => selected && api.removeTask(selected.id).catch(console.error)}>
-            <IcoTrash size={13} /> 删除
-          </button>
-          <div class="spacer"></div>
-          <button class="btn" onClick={() => (hasActive ? api.pauseAll() : api.resumeAll()).catch(console.error)}>
-            {hasActive ? <IcoPause size={13} /> : <IcoPlay size={13} />}
-            {hasActive ? "全部暂停" : "全部开始"}
-          </button>
-          <div class="search">
-            <IcoSearch size={13} />
-            <input placeholder="搜索" value={query}
-              onInput={(e) => setQuery((e.target as HTMLInputElement).value)} />
-          </div>
-          <button class="icon-btn" title="切换主题" onClick={() => setTheme(theme === "light" ? "dark" : "light")}>
-            {theme === "light" ? <IcoMoon size={15} /> : <IcoSun size={15} />}
-          </button>
-        </div>
-
-        <div class="table">
-          <div class="thead">
-            {HEADERS.map((h) => (
-              <div class={h.key ? "sortable" : ""} onClick={() => h.key && clickHeader(h.key)}>
-                {h.label}
-                {h.key === sort.key && <span class="sort-arrow">{sort.asc ? "▲" : "▼"}</span>}
+      {showSettings && boot ? (
+        <SettingsPage boot={boot} />
+      ) : showNew && boot ? (
+        <NewTaskPage defaultDir={boot.default_dir} onClose={() => setShowNew(false)}
+          onCreated={(id) => { setShowNew(false); setMenu(null); setSelectedId(id); setProgressId(id); }} />
+      ) : (
+        <div class="workspace">
+          <div class="main">
+            <div class="page-head">
+              <div>
+                <h1 class="page-title">{filterTitle}</h1>
+                <p class="page-sub">{visible.length} 个任务</p>
               </div>
-            ))}
-          </div>
-          {visible.length === 0 ? (
-            <div class="empty" style={{ height: "60%" }}>
-              <IcoDown size={28} />
-              <span>没有{filterTitle === "全部" ? "" : filterTitle}任务</span>
+              <div class="page-head-right">
+                <div class="search">
+                  <IcoSearch size={16} />
+                  <input placeholder="搜索文件名" value={query}
+                    onInput={(e) => setQuery((e.target as HTMLInputElement).value)} />
+                </div>
+                <button class="icon-btn" title="切换主题" onClick={() => setTheme(theme === "light" ? "dark" : "light")}>
+                  {theme === "light" ? <IcoMoon size={18} /> : <IcoSun size={18} />}
+                </button>
+              </div>
             </div>
-          ) : (
-            visible.map((t) => (
-              <TaskRow key={t.id} t={t} selected={t.id === selectedId}
-                onSelect={() => setSelectedId(t.id)}
-                onOpenDetail={() => { setSelectedId(t.id); setDetailOpen(true); }}
-                onMenu={(x, y) => { setSelectedId(t.id); setMenu({ x, y, id: t.id }); }} />
-            ))
+            <div class="toolbar">
+              <button class="btn primary" onClick={() => { setShowNew(true); setShowSettings(false); setMenu(null); }}>
+                <IcoPlus size={16} /> 新建下载
+              </button>
+              <button class="btn" disabled={!selected || selected.state === "completed" || isRunning(selected) || selected.state === "queued"}
+                onClick={() => selected && api.resumeTask(selected.id).catch(console.error)}>
+                <IcoPlay size={16} /> 继续
+              </button>
+              <button class="btn" disabled={!selected || !(isRunning(selected) || selected.state === "queued")}
+                onClick={() => selected && api.pauseTask(selected.id).catch(console.error)}>
+                <IcoPause size={16} /> 暂停
+              </button>
+              <button class="btn danger" disabled={!selected}
+                onClick={() => selected && api.removeTask(selected.id, true).catch(console.error)}>
+                <IcoTrash size={16} /> 删除
+              </button>
+              <div class="spacer"></div>
+              <button class="btn" onClick={() => (hasActive ? api.pauseAll() : api.resumeAll()).catch(console.error)}>
+                {hasActive ? <IcoPause size={16} /> : <IcoPlay size={16} />}
+                {hasActive ? "全部暂停" : "全部开始"}
+              </button>
+            </div>
+
+            <div class="table">
+              <div class="thead">
+                {HEADERS.map((h) => (
+                  <div class={h.key ? "sortable" : ""} onClick={() => h.key && clickHeader(h.key)}>
+                    {h.label}
+                    {h.key === sort.key && <span class="sort-arrow">{sort.asc ? "▲" : "▼"}</span>}
+                  </div>
+                ))}
+              </div>
+              {visible.length === 0 ? (
+                <div class="empty" style={{ height: "60%" }}>
+                  <IcoDown size={32} />
+                  <span>没有{filterTitle === "全部" ? "" : filterTitle}任务</span>
+                </div>
+              ) : (
+                visible.map((t) => (
+                  <TaskRow key={t.id} t={t} selected={t.id === selectedId}
+                    onSelect={() => { setSelectedId(t.id); setProgressId(t.id); }}
+                    onOpenDetail={() => { setSelectedId(t.id); setMenu(null); setProgressId(t.id); }}
+                    onMenu={(x, y) => { setSelectedId(t.id); setMenu({ x, y, id: t.id }); }} />
+                ))
+              )}
+            </div>
+          </div>
+
+          {progressId != null && tasks.find((t) => t.id === progressId) && (
+            <DetailPane
+              t={tasks.find((t) => t.id === progressId)!}
+              onToggle={() => toggleTask(tasks.find((t) => t.id === progressId)!)}
+              onCancel={() => {
+                const id = progressId;
+                api.cancelTask(id).catch(console.error);
+              }}
+              onHide={() => { setMenu(null); setProgressId(null); }}
+            />
           )}
         </div>
-      </div>
-
-      {detailOpen && selected && (
-        <DetailPanel t={selected} onToggle={() => toggleTask(selected)}
-          onRemove={() => { api.removeTask(selected.id).catch(console.error); setDetailOpen(false); }}
-          onClose={() => setDetailOpen(false)} />
       )}
 
-      {menu && menuTask && <ContextMenu menu={menu} t={menuTask}
-        onDetail={() => setDetailOpen(true)} />}
-
-      {showNew && boot && (
-        <NewTaskModal defaultDir={boot.default_dir} onClose={() => setShowNew(false)}
-          onCreated={(id) => { setShowNew(false); setSelectedId(id); }} />
+      {menu && menuTask && !showNew && !showSettings && (
+        <ContextMenu menu={menu} t={menuTask}
+          onClose={() => setMenu(null)}
+          onDetail={() => { setMenu(null); setProgressId(menuTask.id); }} />
       )}
-      {showSettings && boot && <SettingsModal boot={boot} onClose={() => setShowSettings(false)} />}
     </div>
   );
 }
@@ -301,16 +343,11 @@ function TaskRow(props: {
 }) {
   const { t } = props;
   const p = pct(t);
-  const running = isRunning(t);
-  const fillCls = t.state === "failed" ? "err" : running ? "" : "paused";
-  const statusCell = t.state === "active"
-    ? `${(p * 100).toFixed(1)}%`
-    : STATE_META[t.state].label;
+  const statusCell = t.state === "failed" || t.state === "queued" || t.state === "canceled"
+    ? STATE_META[t.state].label
+    : `${Math.floor(p * 100)}%`;
 
-  const onDblClick = () => {
-    if (t.state === "completed") api.openPath(`${t.dir}/${t.name}`);
-    else props.onOpenDetail();
-  };
+  const onDblClick = () => props.onOpenDetail();
 
   return (
     <div class={"trow" + (props.selected ? " selected" : "")}
@@ -321,29 +358,27 @@ function TaskRow(props: {
         props.onMenu(Math.min(e.clientX, window.innerWidth - 190), Math.min(e.clientY, window.innerHeight - 300));
       }}>
       <div class="cell-name">
-        <span class="mini-ico"><TypeIcon type={fileType(t.name)} size={13} /></span>
+        <span class="mini-ico"><TypeIcon type={fileType(t.name)} size={16} /></span>
         <span class="nm">{t.name || t.url}</span>
       </div>
       <div class="num">{t.size ? fmtBytes(t.size) : t.state === "completed" ? fmtBytes(t.done) : "—"}</div>
-      <div class="cell-status">
-        <span class={"state-badge " + STATE_META[t.state].cls} style={{ width: "fit-content" }}>{statusCell}</span>
-        {t.state !== "completed" && t.done > 0 && (
-          <div class="bar"><div class={"bar-fill " + fillCls} style={{ width: `${(p * 100).toFixed(2)}%` }}></div></div>
-        )}
-      </div>
-      <div class="num">{t.state === "active" ? fmtSpeed(t.speed) : "—"}</div>
-      <div class="num">{t.state === "active" ? fmtEta(t) : "—"}</div>
+      <div class="num">{statusCell}</div>
+      <div class="num">{fmtTime(t.created_at)}</div>
       <div class="num">{fmtTime(lastTry(t))}</div>
     </div>
   );
 }
 
-function ContextMenu(props: { menu: CtxMenu; t: TaskInfo; onDetail: () => void }) {
+function ContextMenu(props: {
+  menu: CtxMenu; t: TaskInfo;
+  onClose: () => void;
+  onDetail: () => void;
+}) {
   const { t } = props;
   const running = isRunning(t) || t.state === "queued";
   const filePath = `${t.dir}/${t.name}`;
   const item = (label: string, action: () => void, cls = "") => (
-    <div class={"ctx-item " + cls} onClick={action}>{label}</div>
+    <div class={"ctx-item " + cls} onClick={() => { props.onClose(); action(); }}>{label}</div>
   );
   return (
     <div class="ctx-menu" style={{ left: props.menu.x, top: props.menu.y }}>
@@ -355,101 +390,117 @@ function ContextMenu(props: { menu: CtxMenu; t: TaskInfo; onDetail: () => void }
       {t.state === "completed" && item("打开", () => api.openPath(filePath))}
       {t.state === "completed" && item("打开所在文件夹", () => api.revealFile(filePath))}
       {item("复制链接地址", () => navigator.clipboard.writeText(t.url))}
-      {item("属性", props.onDetail)}
-      <div class="ctx-sep"></div>
-      {item("删除", () => api.removeTask(t.id).catch(console.error), "danger")}
-    </div>
-  );
-}
-
-function DetailPanel(props: { t: TaskInfo; onToggle: () => void; onRemove: () => void; onClose: () => void }) {
-  const { t } = props;
-  const p = pct(t);
-  const running = isRunning(t);
-  return (
-    <div class="detail">
-      <div class="detail-head">
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <span class={"state-badge " + STATE_META[t.state].cls}>{STATE_META[t.state].label}</span>
-          <button class="icon-btn" onClick={props.onClose}><IcoX size={13} /></button>
-        </div>
-        <div class="detail-name">{t.name || t.url}</div>
-        <div style={{ fontSize: 11.5, color: "var(--text-3)" }}>
-          {TYPE_LABEL[fileType(t.name)]} · {t.size ? fmtBytes(t.size) : "大小未知"}
-          {t.resumable ? "" : " · 不支持断点"}
-        </div>
-      </div>
-
-      {t.state !== "completed" && t.segments.length > 0 && (
-        <div class="seg-section">
-          <div class="seg-title">
-            <span>分段 ({t.segments.length})</span>
-            <span>{(p * 100).toFixed(1)}%</span>
-          </div>
-          <div class="seg-map">
-            {t.segments.map((s) => {
-              const len = s.end > s.start ? s.end - s.start : Math.max(s.done, 1);
-              return (
-                <div class="seg-cell" style={{ flex: len }}>
-                  <div class="seg-cell-fill" style={{ width: `${Math.min(100, (s.done / len) * 100).toFixed(1)}%` }}></div>
-                </div>
-              );
-            })}
-          </div>
-          {t.state === "failed" && <div class="detail-err">{t.error}</div>}
-        </div>
+      {item("进度", props.onDetail)}
+      {t.state !== "completed" && t.state !== "canceled" && (
+        item("取消", () => api.cancelTask(t.id).catch(console.error))
       )}
-
-      <div class="stat-grid">
-        <div><div class="stat-label">已下载</div><div class="stat-value">{fmtBytes(t.done)}</div></div>
-        <div><div class="stat-label">总大小</div><div class="stat-value">{t.size ? fmtBytes(t.size) : "—"}</div></div>
-        <div><div class="stat-label">速度</div><div class="stat-value">{t.state === "active" ? fmtSpeed(t.speed) : "—"}</div></div>
-        <div><div class="stat-label">剩余时间</div><div class="stat-value">{t.state === "active" ? fmtEta(t) : "—"}</div></div>
-        <div><div class="stat-label">创建时间</div><div class="stat-value">{fmtTime(t.created_at)}</div></div>
-        <div><div class="stat-label">完成时间</div><div class="stat-value">{fmtTime(t.completed_at) || "—"}</div></div>
-      </div>
-
-      <div class="kv-section">
-        <div>
-          <div class="kv-label">
-            链接 (永久保留, 可重新下载)
-            <button class="icon-btn" style={{ width: 20, height: 20 }}
-              onClick={() => navigator.clipboard.writeText(t.url)}>
-              <IcoCopy size={12} />
-            </button>
-          </div>
-          <div class="kv-value">{t.url}</div>
-        </div>
-        {t.final_url !== t.url && (
-          <div>
-            <div class="kv-label">实际地址 (重定向后)</div>
-            <div class="kv-value">{t.final_url}</div>
-          </div>
-        )}
-        <div>
-          <div class="kv-label">保存位置</div>
-          <div class="kv-value">{t.dir}/{t.name}</div>
-        </div>
-      </div>
-
-      <div class="detail-actions">
-        {t.state === "completed" ? (
-          <button class="btn" style={{ flex: 1 }} onClick={() => api.revealFile(`${t.dir}/${t.name}`)}>
-            <IcoFolder size={13} /> 在 Finder 中显示
-          </button>
-        ) : (
-          <button class="btn" style={{ flex: 1 }} onClick={props.onToggle}>
-            {running || t.state === "queued" ? <IcoPause size={13} /> : <IcoPlay size={13} />}
-            {running || t.state === "queued" ? "暂停" : t.state === "failed" ? "重试" : "开始"}
-          </button>
-        )}
-        <button class="btn danger" onClick={props.onRemove}><IcoTrash size={13} /> 删除</button>
-      </div>
+      <div class="ctx-sep"></div>
+      {item("删除", () => api.removeTask(t.id, true).catch(console.error), "danger")}
     </div>
   );
 }
 
-function NewTaskModal(props: { defaultDir: string; onClose: () => void; onCreated: (id: number) => void }) {
+function DetailPane(props: { t: TaskInfo; onToggle: () => void; onCancel: () => void; onHide: () => void }) {
+  const { t } = props;
+  const [tab, setTab] = useState<"download" | "options" | "connections">("download");
+  const p = pct(t);
+  const pctLabel = `${Math.floor(p * 100)}%`;
+  const running = isRunning(t) || t.state === "queued";
+  const conn = t.max_segments || t.segments.length || 8;
+  const line = (k: string, v: string) => (
+    <div class="kv-line"><span class="k">{k}</span><span class="v">{v}</span></div>
+  );
+  const resumable = t.state === "probing" || t.size == null
+    ? "Unknown"
+    : t.resumable ? "Yes" : "No";
+
+  return (
+    <aside class="detail">
+      <div class="detail-top">
+        <div class="prog-title">{pctLabel} {t.name || t.url}</div>
+        <button class="icon-btn" title="关闭" onClick={props.onHide}><IcoX size={16} /></button>
+      </div>
+      <div class="prog-tabs">
+        {(["download", "options", "connections"] as const).map((k) => (
+          <button class={"prog-tab" + (tab === k ? " on" : "")} onClick={() => setTab(k)}>
+            {k === "download" ? "下载" : k === "options" ? "选项" : "连接"}
+          </button>
+        ))}
+      </div>
+        <div class="prog-body">
+          {tab === "download" && (
+            <>
+              {line("URL", t.url)}
+              {line("Status", STATE_META[t.state].label + (t.error ? ` — ${t.error}` : ""))}
+              {line("File Size", t.size ? fmtBytes(t.size) : "Unknown")}
+              {line("Downloaded", `${fmtBytes(t.done)} ( ${pctLabel} )`)}
+              {line("Bandwidth", t.state === "active" ? fmtSpeed(t.speed) : "0 Byte/sec")}
+              {line("Remaining Time", t.state === "active" ? fmtEta(t) : "Unknown")}
+              {line("Resumable", resumable)}
+              <div class="prog-bar"><div style={{ width: `${(p * 100).toFixed(2)}%` }}></div></div>
+              <div class="seg-title" style={{ margin: 0 }}>
+                <span>Segments: {t.segments.length}</span>
+              </div>
+              <div class="seg-map">
+                {(t.segments.length ? t.segments : [{ start: 0, end: 1, done: 0, idx: 0 }]).map((s) => {
+                  const len = s.end > s.start ? s.end - s.start : Math.max(s.done, 1);
+                  return (
+                    <div class="seg-cell" style={{ flex: Math.max(len, 1) }}>
+                      <div class="seg-cell-fill" style={{ width: `${Math.min(100, (s.done / len) * 100).toFixed(1)}%` }}></div>
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
+          {tab === "options" && (
+            <>
+              <div class="kv-line">
+                <span class="k">Connections</span>
+                <span class="v">
+                  <div class="stepper">
+                    <button onClick={() => api.setConnections(t.id, Math.max(1, conn - 1)).catch(console.error)}>−</button>
+                    <b>{conn}</b>
+                    <button onClick={() => api.setConnections(t.id, Math.min(16, conn + 1)).catch(console.error)}>+</button>
+                  </div>
+                </span>
+              </div>
+              <div class="settings-hint">
+                {isRunning(t) ? "下载中修改会记下来, 暂停后再继续即按新连接数重切剩余分段." : "暂停状态下修改会立刻重切剩余分段."}
+              </div>
+            </>
+          )}
+          {tab === "connections" && (
+            <>
+              {t.segments.length === 0 && <div class="settings-hint">尚未开始分段</div>}
+              {t.segments.map((s) => {
+                const len = s.end > s.start ? s.end - s.start : Math.max(s.done, 1);
+                return (
+                  <div class="conn-row">
+                    <span>#{s.idx}</span>
+                    <span>{fmtBytes(s.start)} – {s.end ? fmtBytes(s.end) : "?"}</span>
+                    <span>{Math.floor((s.done / len) * 100)}%</span>
+                  </div>
+                );
+              })}
+            </>
+          )}
+        </div>
+        <div class="prog-foot">
+          {t.state !== "completed" && (
+            <button class="btn" onClick={props.onToggle} disabled={t.state === "probing"}>
+              {running ? "暂停" : t.state === "failed" ? "重试" : "继续"}
+            </button>
+          )}
+          {t.state !== "completed" && t.state !== "canceled" && (
+            <button class="btn danger" onClick={props.onCancel}>取消</button>
+          )}
+        </div>
+    </aside>
+  );
+}
+
+function NewTaskPage(props: { defaultDir: string; onClose: () => void; onCreated: (id: number) => void }) {
   const [url, setUrl] = useState("");
   const [dir, setDir] = useState(props.defaultDir);
   const [conn, setConn] = useState(8);
@@ -504,12 +555,13 @@ function NewTaskModal(props: { defaultDir: string; onClose: () => void; onCreate
   };
 
   return (
-    <div class="overlay" onClick={props.onClose}>
-      <div class="modal" onClick={(e) => e.stopPropagation()}>
-        <h2>新建下载</h2>
+    <div class="page">
+      <div class="page-inner">
+        <h1 class="page-title">新建下载</h1>
+        <p class="page-sub">粘贴 http/https 链接, 支持多行批量.</p>
         <div class="field">
-          <label>下载链接 (支持多行批量)</label>
-          <textarea rows={3} autofocus placeholder="https://…" value={url}
+          <label>下载链接</label>
+          <textarea rows={4} autofocus placeholder="https://…" value={url}
             onInput={(e) => setUrl((e.target as HTMLTextAreaElement).value)} />
         </div>
         {previewName && (
@@ -551,10 +603,10 @@ function NewTaskModal(props: { defaultDir: string; onClose: () => void; onCreate
         </div>
         {err && <div class="detail-err">{err}</div>}
         <div class="modal-foot">
-          <button class="btn" onClick={props.onClose}>取消</button>
+          <button class="btn" onClick={props.onClose}>返回</button>
           <button class="btn" disabled={!urls.length || busy} onClick={() => create(true)}>加入队列</button>
           <button class="btn primary" disabled={!urls.length || busy} onClick={() => create(false)}>
-            <IcoDown size={13} /> 开始下载
+            <IcoDown size={16} /> 开始下载
           </button>
         </div>
       </div>
@@ -562,55 +614,45 @@ function NewTaskModal(props: { defaultDir: string; onClose: () => void; onCreate
   );
 }
 
-function SettingsModal(props: { boot: Boot; onClose: () => void }) {
+function SettingsPage(props: { boot: Boot }) {
   const { boot } = props;
-  const [copied, setCopied] = useState(false);
-  const copyToken = () => {
-    navigator.clipboard.writeText(boot.token);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
-  };
   return (
-    <div class="overlay" onClick={props.onClose}>
-      <div class="modal" style={{ width: 520 }} onClick={(e) => e.stopPropagation()}>
-        <h2>设置</h2>
-        <div>
-          <div class="side-title" style={{ padding: "0 0 2px" }}>通用</div>
+    <div class="page">
+      <div class="page-inner">
+        <h1 class="page-title">设置</h1>
+        <p class="page-sub">本机下载引擎与浏览器扩展共用 localhost API, 无需配对令牌.</p>
+        <div class="settings-block">
+          <div class="settings-block-title">通用</div>
           <div class="settings-row">
-            <div><div class="settings-label">默认下载目录</div></div>
+            <div>
+              <div class="settings-label">默认下载目录</div>
+              <div class="settings-hint">新任务默认写到这里, 创建时可改</div>
+            </div>
             <span class="mono-chip">{boot.default_dir}</span>
           </div>
           <div class="settings-row">
             <div>
-              <div class="settings-label">同时下载任务数 / 每任务连接数</div>
-              <div class="settings-hint">当前版本为固定值 3 / 8, 可视化配置在 v1.1 提供</div>
+              <div class="settings-label">同时下载 / 每任务连接数</div>
+              <div class="settings-hint">当前版本固定 3 / 8, 可视化配置在 v1.1</div>
             </div>
             <span class="mono-chip">3 / 8</span>
           </div>
         </div>
-        <div>
-          <div class="side-title" style={{ padding: "6px 0 2px" }}>浏览器扩展</div>
+        <div class="settings-block">
+          <div class="settings-block-title">浏览器扩展</div>
           <div class="settings-row">
-            <div><div class="settings-label">API 地址</div></div>
+            <div>
+              <div class="settings-label">API</div>
+              <div class="settings-hint">仅绑定回环地址. 扩展加载后, app 在跑即可接管</div>
+            </div>
             <span class="mono-chip">127.0.0.1:{boot.port}</span>
           </div>
           <div class="settings-row">
             <div>
-              <div class="settings-label">访问令牌</div>
-              <div class="settings-hint">粘贴到扩展设置中完成配对</div>
+              <div class="settings-label">核心版本</div>
             </div>
-            <span class="mono-chip">
-              {copied ? "已复制" : boot.token.slice(0, 10) + "···"}
-              <button onClick={copyToken}><IcoCopy size={12} /></button>
-            </span>
-          </div>
-          <div class="settings-row">
-            <div><div class="settings-label">核心版本</div></div>
             <span class="mono-chip">v{boot.version}</span>
           </div>
-        </div>
-        <div class="modal-foot">
-          <button class="btn primary" onClick={props.onClose}>完成</button>
         </div>
       </div>
     </div>

@@ -25,7 +25,7 @@ Not in v0.1: dynamic re-segmentation, rate limit, proxy, HLS/DASH/FTP, video sni
 
 ```mermaid
 flowchart LR
-  Ext[Chrome extension] -->|REST + WS token| API["localhost :41320"]
+  Ext[Chrome extension] -->|REST + WS loopback| API["localhost :41320"]
   UI[Tauri webview UI] --> API
   API --> Core[Rust Core]
   Core --> Disk[(file + SQLite)]
@@ -56,17 +56,17 @@ just windows-x86    # x86_64-pc-windows-msvc nsis
 just open           # open the last macOS .app
 ```
 
-Default download directory is the user Downloads folder. Core state and the pairing token:
+Default download directory is the user Downloads folder. Core state:
 
 - macOS: `~/Library/Application Support/dash-download/`
 
-API binds `127.0.0.1:41320`. Header: `x-dd-token`. WS: `/api/ws?token=...`.
+API binds `127.0.0.1:41320`. No pairing token. Browser clients send `x-dd-client`; CORS allowlists extension / Tauri / vite origins.
 
 ## Chrome extension
 
 1. Start the app
 2. Chrome → `chrome://extensions` → Developer mode → Load unpacked → select `extension/`
-3. Copy the token from app Settings into the extension popup
+3. Reload the extension after updates. Popup only has takeover toggle + health.
 
 If the app is not running, the browser download is left untouched. Right-click a link for a manual send. Files under 1 MB or `text/html` are not taken over.
 
@@ -119,13 +119,13 @@ just windows-x86
 just open
 ```
 
-默认下到用户 Downloads. 状态与配对 token 在 `~/Library/Application Support/dash-download/`. API: `127.0.0.1:41320`, header `x-dd-token`.
+默认下到用户 Downloads. 状态在 `~/Library/Application Support/dash-download/`. API: `127.0.0.1:41320`, 无配对 token.
 
 ## Chrome 扩展
 
 1. 先启动 app
 2. Chrome `chrome://extensions` 开发者模式 → 加载已解压的扩展 → 选 `extension/`
-3. 从 app 设置复制 token 粘贴到扩展 popup
+3. 更新后需要重新加载扩展. popup 只有接管开关和健康检查.
 
 app 未运行时不接管, 浏览器原下载继续. 可右键链接手动发送. 小于 1MB 或 `text/html` 不接管.
 

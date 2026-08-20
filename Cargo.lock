@@ -633,7 +633,6 @@ dependencies = [
  "axum",
  "dd-core",
  "dirs",
- "rand 0.8.7",
  "serde",
  "serde_json",
  "tauri",

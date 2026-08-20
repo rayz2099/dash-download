@@ -1,6 +1,6 @@
 use crate::error::{CoreError, Result};
 use crate::probe::probe;
-use crate::runner::{plan_segments, run_segment, run_stream, SegOutcome};
+use crate::runner::{plan_segments, replan_remaining, run_segment, run_stream, SegOutcome};
 use crate::store::Store;
 use crate::types::{
     AddTaskOptions, EngineEvent, SegmentInfo, TaskInfo, TaskProgress, TaskState,
@@ -117,12 +117,14 @@ impl Engine {
             .clone()
             .unwrap_or_else(|| self.inner.cfg.default_dir.to_string_lossy().into_owned());
         let name = opts.name.clone().unwrap_or_default();
+        let max_segments = opts.segments.unwrap_or(self.inner.cfg.max_segments).clamp(1, 16);
         let id = self.inner.store.lock().unwrap().insert_task(
             url,
             &dir,
             &name,
             TaskState::Queued,
             &opts.ctx,
+            max_segments,
         )?;
         let info = self.inner.task_info(id)?;
         self.inner.emit(EngineEvent::TaskAdded { task: info.clone() });
@@ -153,10 +155,14 @@ impl Engine {
         Ok(())
     }
 
-    /// 恢复暂停/失败的任务: 回到队列由调度器按并发额度拉起
+    /// 恢复暂停/失败/取消的任务: 回到队列由调度器按并发额度拉起.
+    /// Canceled 与 Paused 一样保留 .ddown, 取消不是删任务.
     pub fn resume(&self, id: i64) -> Result<()> {
         let info = self.inner.task_info(id)?;
-        if !matches!(info.state, TaskState::Paused | TaskState::Failed) {
+        if !matches!(
+            info.state,
+            TaskState::Paused | TaskState::Failed | TaskState::Canceled
+        ) {
             return Ok(());
         }
         self.inner.set_state_emit(id, TaskState::Queued, "")?;
@@ -183,6 +189,28 @@ impl Engine {
         Ok(())
     }
 
+    /// 调整并行度. 下载中只记偏好, 暂停/未开始时立刻按剩余字节重切分段.
+    pub fn set_connections(&self, id: i64, n: u32) -> Result<()> {
+        let n = n.clamp(1, 16);
+        let info = self.inner.task_info(id)?;
+        self.inner.store.lock().unwrap().set_max_segments(id, n)?;
+        if matches!(info.state, TaskState::Paused | TaskState::Queued | TaskState::Failed | TaskState::Canceled)
+            && !info.segments.is_empty()
+            && info.resumable
+        {
+            let segs = replan_remaining(
+                &info.segments,
+                n,
+                self.inner.cfg.min_segment_size,
+            );
+            self.inner.store.lock().unwrap().replace_segments(id, &segs)?;
+        }
+        if let Ok(t) = self.inner.task_info(id) {
+            self.inner.emit(EngineEvent::TaskUpdated { task: t });
+        }
+        Ok(())
+    }
+
     /// 用原链接重新下载 (NDM 的 Redownload): 清进度重新排队.
     /// 注意: 运行中的管理协程收到 cancel 后可能补写一次过期 checkpoint,
     /// 只影响短暂的显示值, 下次采样即被覆盖, 不做加锁串行化
@@ -202,7 +230,32 @@ impl Engine {
         Ok(())
     }
 
-    /// 删除任务; delete_file 只对已完成文件生效, 未完成的 .ddown 临时文件总是清掉
+    /// 取消下载: 停跑, 任务留在列表, .ddown 断点保留, 以后可 Resume.
+    /// 与 pause 的差别只是状态落 Canceled; 清文件只走 remove.
+    pub fn cancel(&self, id: i64) -> Result<()> {
+        let handled = {
+            let running = self.inner.running.lock().unwrap();
+            if let Some(r) = running.get(&id) {
+                r.pause_intent.store(false, Ordering::Relaxed);
+                let _ = r.cancel.send(true);
+                true
+            } else {
+                false
+            }
+        };
+        if !handled {
+            let info = self.inner.task_info(id)?;
+            if matches!(
+                info.state,
+                TaskState::Queued | TaskState::Paused | TaskState::Failed
+            ) {
+                self.inner.set_state_emit(id, TaskState::Canceled, "")?;
+            }
+        }
+        Ok(())
+    }
+
+    /// 删除任务并从磁盘清掉未完成的 .ddown; delete_file 时连已完成文件一起删.
     pub fn remove(&self, id: i64, delete_file: bool) -> Result<()> {
         let info = self.inner.task_info(id)?;
         {
@@ -321,7 +374,7 @@ impl Inner {
             let name = if info.name.is_empty() { p.filename.clone() } else { info.name.clone() };
             let segs = match (p.size, p.resumable) {
                 (Some(size), true) if size > 0 => {
-                    plan_segments(size, self.cfg.max_segments, self.cfg.min_segment_size)
+                    plan_segments(size, info.max_segments, self.cfg.min_segment_size)
                 }
                 (Some(size), false) => vec![SegmentInfo { idx: 0, start: 0, end: size, done: 0 }],
                 _ => vec![SegmentInfo { idx: 0, start: 0, end: 0, done: 0 }],
@@ -415,8 +468,21 @@ impl Inner {
             return Err(e);
         }
         if canceled {
-            if pause_intent.load(Ordering::Relaxed) {
-                self.set_state_emit(id, TaskState::Paused, "")?;
+            let ours = {
+                let running = self.running.lock().unwrap();
+                running
+                    .get(&id)
+                    .map(|r| Arc::ptr_eq(&r.pause_intent, &pause_intent))
+                    .unwrap_or(false)
+            };
+            // 句柄已被 remove/redownload 换掉则不要覆盖新状态
+            if ours {
+                let next = if pause_intent.load(Ordering::Relaxed) {
+                    TaskState::Paused
+                } else {
+                    TaskState::Canceled
+                };
+                self.set_state_emit(id, next, "")?;
             }
             return Ok(());
         }

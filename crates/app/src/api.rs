@@ -9,7 +9,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use dd_core::{AddTaskOptions, Engine, RequestContext};
+use dd_core::{AddTaskOptions, CoreError, Engine, EngineSettings, ProxyCfg, RequestContext};
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
@@ -20,6 +20,8 @@ pub struct ApiCtx {
     pub engine: Engine,
     /// setup 之后填入, 扩展接管时用来把主窗口拉到前台
     pub app: Arc<Mutex<Option<tauri::AppHandle>>>,
+    pub cfg_dir: std::path::PathBuf,
+    pub prefs: crate::prefs::Store,
 }
 
 struct ApiError(dd_core::CoreError);
@@ -44,7 +46,7 @@ impl From<dd_core::CoreError> for ApiError {
 pub async fn serve(ctx: Arc<ApiCtx>, port: u16) -> std::io::Result<()> {
     let cors = CorsLayer::new()
         .allow_origin(AllowOrigin::predicate(|origin, _req| origin_ok(origin)))
-        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS])
         .allow_headers([
             header::CONTENT_TYPE,
             HeaderName::from_static("x-dd-client"),
@@ -60,7 +62,10 @@ pub async fn serve(ctx: Arc<ApiCtx>, port: u16) -> std::io::Result<()> {
         .route("/api/tasks/{id}", delete(remove_task))
         .route("/api/pause-all", post(pause_all))
         .route("/api/resume-all", post(resume_all))
+        .route("/api/settings", get(get_settings).put(put_settings))
+        .route("/api/proxy-test", post(test_proxy))
         .route("/api/focus", post(focus_window))
+        .route("/api/ext-origin", post(ext_origin))
         .layer(middleware::from_fn(check_client));
 
     let app = Router::new()
@@ -235,6 +240,38 @@ async fn remove_task(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+
+async fn get_settings(State(ctx): State<Arc<ApiCtx>>) -> Json<EngineSettings> {
+    Json(ctx.engine.settings())
+}
+
+/// 写 prefs.json 与热更新引擎必须同一次成功, 避免 UI 显示已保存但下载仍走旧代理.
+async fn put_settings(
+    State(ctx): State<Arc<ApiCtx>>,
+    Json(req): Json<EngineSettings>,
+) -> Result<Response, ApiError> {
+    let applied = ctx.engine.apply_settings(req)?;
+    ctx.prefs
+        .patch(|p| p.apply_engine(&applied))
+        .map_err(|e| ApiError(CoreError::Other(e)))?;
+    Ok(Json(applied).into_response())
+}
+
+
+#[derive(Deserialize)]
+struct ProxyTestReq {
+    url: String,
+    proxy: ProxyCfg,
+}
+
+async fn test_proxy(
+    State(ctx): State<Arc<ApiCtx>>,
+    Json(req): Json<ProxyTestReq>,
+) -> Result<Response, ApiError> {
+    let r = ctx.engine.probe_url(&req.proxy, &req.url).await?;
+    Ok(Json(r).into_response())
+}
+
 async fn pause_all(State(ctx): State<Arc<ApiCtx>>) -> Result<Response, ApiError> {
     ctx.engine.pause_all()?;
     Ok(StatusCode::NO_CONTENT.into_response())
@@ -297,4 +334,17 @@ async fn ws_loop(mut socket: WebSocket, ctx: Arc<ApiCtx>) {
             }
         }
     }
+}
+
+#[derive(Deserialize)]
+struct ExtOrigin {
+    origin: String,
+}
+
+/// 扩展上报自身 origin, 写入 native host 白名单, 下次没跑 app 时仍能被拉起.
+async fn ext_origin(State(ctx): State<Arc<ApiCtx>>, Json(req): Json<ExtOrigin>) -> Result<Response, ApiError> {
+    crate::launch::remember_origin(&ctx.cfg_dir, &req.origin).map_err(|e| {
+        dd_core::CoreError::Other(e)
+    })?;
+    Ok(Json(json!({ "ok": true })).into_response())
 }

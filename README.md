@@ -6,6 +6,8 @@ A cross-platform download manager, rewritten from [Neat Download Manager](https:
 
 Closing the window hides it to the tray. Downloads keep running.
 
+![Dash Download app](docs/app.png)
+
 ## Status
 
 v0.1 is usable on **macOS arm64**. Linux x86_64 and Windows x86_64 are built by GitHub Actions on tag; those hosts are not yet dogfooded.
@@ -52,7 +54,9 @@ Get a tagged build from [GitHub Releases](https://github.com/rayz2099/dash-downl
 | Linux x86_64 | `*.deb` | `sudo dpkg -i dash-download_*.deb` then `sudo apt-get install -f` if webkit deps are missing |
 | Windows x86_64 | NSIS `*.exe` | Run the installer |
 
-Start the app first. Closing the window keeps it in the tray.
+Start the app first. Closing the window keeps it in the tray. Login autostart is on by default so Chrome can wake the app via a launch-only native host.
+
+To ship auto-update artifacts, set repo secret `TAURI_SIGNING_PRIVATE_KEY` to the contents of the local gitignored `.secrets/updater.key`.
 
 Default download directory is the user Downloads folder. Core state:
 
@@ -90,7 +94,7 @@ git push origin v1.0.0
 | Job | Asset |
 |---|---|
 | macOS arm64 | `.app` + `.dmg` |
-| Linux x86_64 | `.deb` |
+| Linux x86_64 | `.deb` + AppImage (updater) |
 | Windows x86_64 | NSIS `.exe` |
 | Chrome MV3 | `dash-download-chrome-<tag>.zip` |
 
@@ -128,6 +132,8 @@ just open           # open the last macOS .app
 
 关窗缩到托盘, 下载不中断.
 
+![Dash Download app](docs/app.png)
+
 ## 状态
 
 v0.1 在 **macOS arm64** 可用. Linux x86_64 / Windows x86_64 由 tag 触发的 GitHub Actions 打包, 尚未在对应主机上日常使用.
@@ -159,7 +165,9 @@ v0.1 不做: 动态再切段, 限速, 代理, HLS/DASH/FTP, 视频嗅探.
 | Linux x86_64 | `*.deb` | `sudo dpkg -i dash-download_*.deb`, 缺 webkit 依赖再 `sudo apt-get install -f` |
 | Windows x86_64 | NSIS `*.exe` | 跑安装程序 |
 
-先启动 app. 关窗后仍在托盘.
+先启动 app. 关窗后仍在托盘. 默认开机自启; Chrome 扩展在 app 没跑时走 native host 拉起.
+
+发自动更新包需要把本机 gitignore 的 `.secrets/updater.key` 全文配到仓库 secret `TAURI_SIGNING_PRIVATE_KEY`.
 
 默认下到用户 Downloads. 状态目录:
 
@@ -197,7 +205,7 @@ git push origin v1.0.0
 | Job | 资产 |
 |---|---|
 | macOS arm64 | `.app` + `.dmg` |
-| Linux x86_64 | `.deb` |
+| Linux x86_64 | `.deb` + AppImage (updater) |
 | Windows x86_64 | NSIS `.exe` |
 | Chrome MV3 | `dash-download-chrome-<tag>.zip` |
 

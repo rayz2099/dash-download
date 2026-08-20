@@ -1,5 +1,6 @@
-// Takeover: 拦截必须先于 Chrome 画出下载气泡; 先 cancel/erase 再交给 app.
+// Takeover: 先确保 app 在跑 (必要时 native host 拉起), 再 abort Chrome 下载.
 const API = "http://127.0.0.1:41320";
+const NATIVE = "dev.ray.dash_download";
 const MIN_SIZE = 1024 * 1024;
 
 const DEFAULTS = { enabled: true };
@@ -25,6 +26,49 @@ function applyDownloadUi() {
   } else if (chrome.downloads.setShelfEnabled) {
     chrome.downloads.setShelfEnabled(enabled);
   }
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function ping() {
+  try {
+    const resp = await fetch(API + "/api/ping");
+    return resp.ok;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function registerOrigin() {
+  try {
+    await api("/api/ext-origin", {
+      method: "POST",
+      body: JSON.stringify({ origin: "chrome-extension://" + chrome.runtime.id + "/" }),
+    });
+  } catch (e) { console.warn("登记 origin 失败:", e); }
+}
+
+/// app 没跑时走 native host 拉起; 拉不起就不要 abort Chrome 下载.
+async function ensureApp() {
+  if (await ping()) {
+    registerOrigin();
+    return true;
+  }
+  try {
+    await chrome.runtime.sendNativeMessage(NATIVE, { op: "wake" });
+  } catch (_) {
+    return false;
+  }
+  for (let i = 0; i < 40; i++) {
+    await sleep(250);
+    if (await ping()) {
+      registerOrigin();
+      return true;
+    }
+  }
+  return false;
 }
 
 async function api(path, opts) {
@@ -94,11 +138,13 @@ function takeover(item) {
   if (inflight.has(item.id) || inflight.has(url)) return;
   inflight.add(item.id);
   inflight.add(url);
-  setTimeout(() => { inflight.delete(item.id); inflight.delete(url); }, 8000);
+  setTimeout(() => { inflight.delete(item.id); inflight.delete(url); }, 12000);
 
-  abortChrome(item.id);
-  sendToApp(url, { referrer: item.referrer, filename: basename(item.filename) })
-    .catch((e) => console.warn("接管失败:", e));
+  ensureApp().then((ok) => {
+    if (!ok) return;
+    abortChrome(item.id);
+    return sendToApp(url, { referrer: item.referrer, filename: basename(item.filename) });
+  }).catch((e) => console.warn("接管失败:", e));
 }
 
 chrome.downloads.onCreated.addListener((item) => takeover(item));
@@ -120,6 +166,7 @@ chrome.runtime.onInstalled.addListener(() => {
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (info.menuItemId !== "dd-download-link" || !info.linkUrl) return;
   try {
+    if (!(await ensureApp())) throw new Error("无法拉起 Dash Download");
     await sendToApp(info.linkUrl, { referrer: tab && tab.url });
   } catch (e) {
     chrome.notifications.create({

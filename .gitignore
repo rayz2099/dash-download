@@ -28,3 +28,6 @@ designs/**/_d_meta.json
 
 # 浏览器自动化快照
 .playwright-mcp/
+
+# 签名私钥 / 扩展打包密钥, 禁止入库
+.secrets/

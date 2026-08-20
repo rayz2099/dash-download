@@ -2,12 +2,14 @@ import type { JSX } from "preact";
 import { useEffect, useMemo, useState } from "preact/hooks";
 import * as api from "./api";
 import type { Boot, TaskInfo } from "./api";
+import { MAX_CONN } from "./api";
+import { SettingsPage, updatePhaseText } from "./settings";
 import {
   fileType, fmtBytes, fmtEta, fmtSpeed, fmtTime, pct, STATE_META, TYPE_LABEL,
 } from "./util";
 import type { FileType } from "./util";
 import {
-  IcoAlert, IcoCheck, IcoClock, IcoDown, IcoGear, IcoMoon, IcoPause,
+  IcoAlert, IcoCheck, IcoClock, IcoDown, IcoGear, IcoMoon, IcoOpen, IcoPause,
   IcoPlay, IcoPlus, IcoQueue, IcoSearch, IcoSun, IcoTrash, IcoX, TypeIcon,
 } from "./icons";
 
@@ -52,6 +54,9 @@ export function App() {
   const [showNew, setShowNew] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [theme, setTheme] = useState(initTheme);
+  const [picked, setPicked] = useState<Set<number>>(() => new Set());
+  const [paneOn, setPaneOn] = useState(false);
+  const [eng, setEng] = useState<api.EngineSettings | null>(null);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -61,8 +66,9 @@ export function App() {
   useEffect(() => {
     let dispose: (() => void) | undefined;
     api.init()
-      .then((b) => {
+      .then(async (b) => {
         setBoot(b);
+        setEng(await api.getSettings());
         dispose = api.connectEvents((ev) => {
           switch (ev.type) {
             case "snapshot":
@@ -71,14 +77,22 @@ export function App() {
             case "task_added":
               setTasks((p) => [ev.task, ...p.filter((t) => t.id !== ev.task.id)]);
               setSelectedId(ev.task.id);
+              setPicked(new Set([ev.task.id]));
               setMenu(null);
               setProgressId(ev.task.id);
+              setPaneOn(true);
               break;
             case "task_updated":
               setTasks((p) => p.map((t) => (t.id === ev.task.id ? ev.task : t)));
               break;
             case "task_removed":
               setTasks((p) => p.filter((t) => t.id !== ev.id));
+              setPicked((prev) => {
+                if (!prev.has(ev.id)) return prev;
+                const n = new Set(prev);
+                n.delete(ev.id);
+                return n;
+              });
               break;
             case "progress":
               setTasks((p) =>
@@ -108,11 +122,12 @@ export function App() {
       if (menu) { setMenu(null); return; }
       if (showNew) { setShowNew(false); return; }
       if (showSettings) { setShowSettings(false); return; }
+      if (paneOn) { setPaneOn(false); return; }
       if (progressId != null) setProgressId(null);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [menu, showNew, showSettings, progressId]);
+  }, [menu, showNew, showSettings, paneOn, progressId]);
 
   useEffect(() => {
     if (!menu) return;
@@ -159,6 +174,57 @@ export function App() {
     const op = isRunning(t) || t.state === "queued" ? api.pauseTask(t.id) : api.resumeTask(t.id);
     op.catch(console.error);
   };
+
+  // 工具栏批量操作只吃勾选集合, 不回退 selectedId, 避免未勾选时误删焦点行.
+  const pickIds = () => [...picked];
+
+  // 打开只对勾选里已完成的任务发 openPath, 未完成没有可打开的落盘文件.
+  const removeMany = (ids: number[]) => {
+    if (!ids.length) return;
+    Promise.all(ids.map((id) => api.removeTask(id, true)))
+      .then(() => {
+        setPicked(new Set());
+        if (progressId != null && ids.includes(progressId)) {
+          setPaneOn(false);
+          setProgressId(null);
+        }
+        if (selectedId != null && ids.includes(selectedId)) setSelectedId(null);
+      })
+      .catch(console.error);
+  };
+
+  const onRowClick = (t: TaskInfo, e: MouseEvent) => {
+    const ids = visible.map((x) => x.id);
+    if (e.shiftKey && selectedId != null) {
+      const a = ids.indexOf(selectedId);
+      const b = ids.indexOf(t.id);
+      if (a >= 0 && b >= 0) {
+        setPicked(new Set(ids.slice(Math.min(a, b), Math.max(a, b) + 1)));
+        setSelectedId(t.id);
+        setProgressId(t.id);
+        setPaneOn(true);
+        return;
+      }
+    }
+    if (e.metaKey || e.ctrlKey) {
+      setPicked((prev) => {
+        const n = new Set(prev);
+        if (n.has(t.id)) n.delete(t.id); else n.add(t.id);
+        return n;
+      });
+      setSelectedId(t.id);
+      return;
+    }
+    setPicked(new Set([t.id]));
+    setSelectedId(t.id);
+    setProgressId(t.id);
+    setPaneOn(true);
+  };
+
+  const visIds = visible.map((x) => x.id);
+  const pickN = visIds.filter((id) => picked.has(id)).length;
+  const allOn = visIds.length > 0 && pickN === visIds.length;
+  const mid = pickN > 0 && !allOn;
 
   const clickHeader = (key: SortKey) =>
     setSort((s) => ({ key, asc: s.key === key ? !s.asc : key === "name" }));
@@ -240,14 +306,18 @@ export function App() {
         </div>
       </div>
 
-      {showSettings && boot ? (
-        <SettingsPage boot={boot} />
-      ) : showNew && boot ? (
-        <NewTaskPage defaultDir={boot.default_dir} onClose={() => setShowNew(false)}
-          onCreated={(id) => { setShowNew(false); setMenu(null); setSelectedId(id); setProgressId(id); }} />
+      {showSettings && boot && eng ? (
+        <SettingsPage boot={boot} eng={eng} onEng={(s) => {
+          setEng(s);
+          setBoot({ ...boot, default_dir: s.default_dir });
+        }} />
+      ) : showNew && boot && eng ? (
+        <NewTaskPage defaultDir={eng.default_dir} defaultConn={eng.max_segments} onClose={() => setShowNew(false)}
+          onCreated={(id) => { setShowNew(false); setMenu(null); setSelectedId(id); setPicked(new Set([id])); setProgressId(id); setPaneOn(true); }} />
       ) : (
         <div class="workspace">
           <div class="main">
+            <UpdateBar />
             <div class="page-head">
               <div>
                 <h1 class="page-title">{filterTitle}</h1>
@@ -276,8 +346,12 @@ export function App() {
                 onClick={() => selected && api.pauseTask(selected.id).catch(console.error)}>
                 <IcoPause size={16} /> 暂停
               </button>
-              <button class="btn danger" disabled={!selected}
-                onClick={() => selected && api.removeTask(selected.id, true).catch(console.error)}>
+              <button class="btn danger" disabled={picked.size === 0}
+                onClick={() => {
+                  const n = picked.size;
+                  if (!confirm(`删除 ${n} 个任务? 已完成文件也会从磁盘删除.`)) return;
+                  removeMany(pickIds());
+                }}>
                 <IcoTrash size={16} /> 删除
               </button>
               <div class="spacer"></div>
@@ -287,8 +361,20 @@ export function App() {
               </button>
             </div>
 
-            <div class="table">
+            <div class="table" onClick={(e) => {
+              const el = e.target as HTMLElement;
+              if (el.closest(".trow, .chk, .sortable, .thead")) return;
+              setPaneOn(false);
+            }}>
               <div class="thead">
+                <div>
+                  <button type="button" class={"chk" + (allOn ? " on" : mid ? " mid" : "")}
+                    title="全选" disabled={!visible.length}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setPicked(allOn ? new Set() : new Set(visIds));
+                    }} />
+                </div>
                 {HEADERS.map((h) => (
                   <div class={h.key ? "sortable" : ""} onClick={() => h.key && clickHeader(h.key)}>
                     {h.label}
@@ -303,10 +389,19 @@ export function App() {
                 </div>
               ) : (
                 visible.map((t) => (
-                  <TaskRow key={t.id} t={t} selected={t.id === selectedId}
-                    onSelect={() => { setSelectedId(t.id); setProgressId(t.id); }}
-                    onOpenDetail={() => { setSelectedId(t.id); setMenu(null); setProgressId(t.id); }}
-                    onMenu={(x, y) => { setSelectedId(t.id); setMenu({ x, y, id: t.id }); }} />
+                  <TaskRow key={t.id} t={t} selected={picked.has(t.id)}
+                    onSelect={(e) => onRowClick(t, e)}
+                    onTogglePick={() => {
+                      setPicked((prev) => {
+                        const n = new Set(prev);
+                        if (n.has(t.id)) n.delete(t.id); else n.add(t.id);
+                        return n;
+                      });
+                      setSelectedId(t.id);
+                    }}
+                    onOpenDetail={() => { setSelectedId(t.id); setMenu(null); setProgressId(t.id); setPaneOn(true); }}
+                    onOpenFile={() => api.openPath(`${t.dir}/${t.name}`)}
+                    onMenu={(x, y) => { setSelectedId(t.id); setPicked(new Set([t.id])); setMenu({ x, y, id: t.id }); }} />
                 ))
               )}
             </div>
@@ -315,12 +410,13 @@ export function App() {
           {progressId != null && tasks.find((t) => t.id === progressId) && (
             <DetailPane
               t={tasks.find((t) => t.id === progressId)!}
+              collapsed={!paneOn}
               onToggle={() => toggleTask(tasks.find((t) => t.id === progressId)!)}
               onCancel={() => {
                 const id = progressId;
                 api.cancelTask(id).catch(console.error);
               }}
-              onHide={() => { setMenu(null); setProgressId(null); }}
+              onHide={() => { setMenu(null); setPaneOn(false); }}
             />
           )}
         </div>
@@ -329,7 +425,7 @@ export function App() {
       {menu && menuTask && !showNew && !showSettings && (
         <ContextMenu menu={menu} t={menuTask}
           onClose={() => setMenu(null)}
-          onDetail={() => { setMenu(null); setProgressId(menuTask.id); }} />
+          onDetail={() => { setMenu(null); setProgressId(menuTask.id); setPaneOn(true); }} />
       )}
     </div>
   );
@@ -337,8 +433,10 @@ export function App() {
 
 function TaskRow(props: {
   t: TaskInfo; selected: boolean;
-  onSelect: () => void;
+  onSelect: (e: MouseEvent) => void;
+  onTogglePick: () => void;
   onOpenDetail: () => void;
+  onOpenFile: () => void;
   onMenu: (x: number, y: number) => void;
 }) {
   const { t } = props;
@@ -347,19 +445,31 @@ function TaskRow(props: {
     ? STATE_META[t.state].label
     : `${Math.floor(p * 100)}%`;
 
-  const onDblClick = () => props.onOpenDetail();
+  const onDblClick = () => {
+    if (t.state === "completed") props.onOpenFile();
+    else props.onOpenDetail();
+  };
 
   return (
     <div class={"trow" + (props.selected ? " selected" : "")}
-      onClick={props.onSelect}
+      onClick={(e) => props.onSelect(e)}
       onDblClick={onDblClick}
       onContextMenu={(e) => {
         e.preventDefault();
         props.onMenu(Math.min(e.clientX, window.innerWidth - 190), Math.min(e.clientY, window.innerHeight - 300));
       }}>
+      <div class="cell-chk" onClick={(e) => { e.stopPropagation(); props.onTogglePick(); }}>
+        <button type="button" class={"chk" + (props.selected ? " on" : "")} />
+      </div>
       <div class="cell-name">
         <span class="mini-ico"><TypeIcon type={fileType(t.name)} size={16} /></span>
         <span class="nm">{t.name || t.url}</span>
+        {t.state === "completed" && (
+          <button type="button" class="row-open" title="打开"
+            onClick={(e) => { e.stopPropagation(); props.onOpenFile(); }}>
+            <IcoOpen size={14} />
+          </button>
+        )}
       </div>
       <div class="num">{t.size ? fmtBytes(t.size) : t.state === "completed" ? fmtBytes(t.done) : "—"}</div>
       <div class="num">{statusCell}</div>
@@ -400,7 +510,7 @@ function ContextMenu(props: {
   );
 }
 
-function DetailPane(props: { t: TaskInfo; onToggle: () => void; onCancel: () => void; onHide: () => void }) {
+function DetailPane(props: { t: TaskInfo; collapsed: boolean; onToggle: () => void; onCancel: () => void; onHide: () => void }) {
   const { t } = props;
   const [tab, setTab] = useState<"download" | "options" | "connections">("download");
   const p = pct(t);
@@ -415,7 +525,8 @@ function DetailPane(props: { t: TaskInfo; onToggle: () => void; onCancel: () => 
     : t.resumable ? "Yes" : "No";
 
   return (
-    <aside class="detail">
+    <aside class={"detail" + (props.collapsed ? " collapsed" : "")}>
+      <div class="detail-inner">
       <div class="detail-top">
         <div class="prog-title">{pctLabel} {t.name || t.url}</div>
         <button class="icon-btn" title="关闭" onClick={props.onHide}><IcoX size={16} /></button>
@@ -461,7 +572,7 @@ function DetailPane(props: { t: TaskInfo; onToggle: () => void; onCancel: () => 
                   <div class="stepper">
                     <button onClick={() => api.setConnections(t.id, Math.max(1, conn - 1)).catch(console.error)}>−</button>
                     <b>{conn}</b>
-                    <button onClick={() => api.setConnections(t.id, Math.min(16, conn + 1)).catch(console.error)}>+</button>
+                    <button onClick={() => api.setConnections(t.id, Math.min(MAX_CONN, conn + 1)).catch(console.error)}>+</button>
                   </div>
                 </span>
               </div>
@@ -496,14 +607,15 @@ function DetailPane(props: { t: TaskInfo; onToggle: () => void; onCancel: () => 
             <button class="btn danger" onClick={props.onCancel}>取消</button>
           )}
         </div>
+      </div>
     </aside>
   );
 }
 
-function NewTaskPage(props: { defaultDir: string; onClose: () => void; onCreated: (id: number) => void }) {
+function NewTaskPage(props: { defaultDir: string; defaultConn: number; onClose: () => void; onCreated: (id: number) => void }) {
   const [url, setUrl] = useState("");
   const [dir, setDir] = useState(props.defaultDir);
-  const [conn, setConn] = useState(8);
+  const [conn, setConn] = useState(props.defaultConn);
   const [showAdv, setShowAdv] = useState(false);
   const [headers, setHeaders] = useState("");
   const [err, setErr] = useState("");
@@ -583,7 +695,7 @@ function NewTaskPage(props: { defaultDir: string; onClose: () => void; onCreated
             <div class="stepper">
               <button onClick={() => setConn(Math.max(1, conn - 1))}>−</button>
               <b>{conn}</b>
-              <button onClick={() => setConn(Math.min(16, conn + 1))}>+</button>
+              <button onClick={() => setConn(Math.min(MAX_CONN, conn + 1))}>+</button>
             </div>
           </div>
         </div>
@@ -614,47 +726,26 @@ function NewTaskPage(props: { defaultDir: string; onClose: () => void; onCreated
   );
 }
 
-function SettingsPage(props: { boot: Boot }) {
-  const { boot } = props;
+function UpdateBar() {
+  const [st, setSt] = useState<api.UpdateStatus | null>(null);
+  useEffect(() => {
+    let on = true;
+    const tick = () => { api.updateStatus().then((s) => on && setSt(s)); };
+    tick();
+    const id = setInterval(tick, 1500);
+    return () => { on = false; clearInterval(id); };
+  }, []);
+  if (!st) return null;
+  // 任务列表顶栏只报可用/下载进度, error 留给设置页, 避免两处同时刷失败文案.
+  if (st.phase === "error") return null;
+  const live = st.phase === "downloading" || st.phase === "waiting" || st.phase === "installing";
+  if (!live && st.phase !== "available") return null;
   return (
-    <div class="page">
-      <div class="page-inner">
-        <h1 class="page-title">设置</h1>
-        <p class="page-sub">本机下载引擎与浏览器扩展共用 localhost API, 无需配对令牌.</p>
-        <div class="settings-block">
-          <div class="settings-block-title">通用</div>
-          <div class="settings-row">
-            <div>
-              <div class="settings-label">默认下载目录</div>
-              <div class="settings-hint">新任务默认写到这里, 创建时可改</div>
-            </div>
-            <span class="mono-chip">{boot.default_dir}</span>
-          </div>
-          <div class="settings-row">
-            <div>
-              <div class="settings-label">同时下载 / 每任务连接数</div>
-              <div class="settings-hint">当前版本固定 3 / 8, 可视化配置在 v1.1</div>
-            </div>
-            <span class="mono-chip">3 / 8</span>
-          </div>
-        </div>
-        <div class="settings-block">
-          <div class="settings-block-title">浏览器扩展</div>
-          <div class="settings-row">
-            <div>
-              <div class="settings-label">API</div>
-              <div class="settings-hint">仅绑定回环地址. 扩展加载后, app 在跑即可接管</div>
-            </div>
-            <span class="mono-chip">127.0.0.1:{boot.port}</span>
-          </div>
-          <div class="settings-row">
-            <div>
-              <div class="settings-label">核心版本</div>
-            </div>
-            <span class="mono-chip">v{boot.version}</span>
-          </div>
-        </div>
-      </div>
+    <div class="update-bar">
+      {updatePhaseText(st)}
+      {st.phase === "available" && (
+        <button class="btn" onClick={() => api.checkNow().then(setSt)}>立即更新</button>
+      )}
     </div>
   );
 }

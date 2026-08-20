@@ -628,7 +628,7 @@ dependencies = [
 
 [[package]]
 name = "dd-app"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "axum",
  "dd-core",
@@ -643,7 +643,7 @@ dependencies = [
 
 [[package]]
 name = "dd-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "futures-util",
  "rand 0.8.7",

@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Dash Download",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "identifier": "dev.ray.dash-download",
   "build": {
     "frontendDist": "../../ui/dist",

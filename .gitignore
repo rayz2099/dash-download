@@ -1,0 +1,27 @@
+# rust
+/target/
+**/*.rs.bk
+
+# node
+node_modules/
+ui/dist/
+
+# tauri 构建生成 (不要入库)
+crates/app/gen/
+
+# 本机运行时数据
+*.sqlite
+*.ddown
+.env
+.env.*
+
+# os / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 设计稿工具元数据
+designs/**/_d_meta.json

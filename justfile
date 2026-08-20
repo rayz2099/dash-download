@@ -1,0 +1,57 @@
+set shell := ["bash", "-euo", "pipefail", "-c"]
+set dotenv-load := false
+
+root := justfile_directory()
+tauri := root / "node_modules/.bin/tauri"
+app_dir := root / "crates/app"
+
+# 与用户约定的三端 triple: macos/arm, linux/x86, windows/x86 均指 64 位
+target_macos := "aarch64-apple-darwin"
+target_linux := "x86_64-unknown-linux-gnu"
+target_windows := "x86_64-pc-windows-msvc"
+
+default:
+    @just --list
+
+# 安装 pnpm 依赖并补齐 rustup 交叉编译 target
+setup:
+    pnpm install
+    pnpm --dir ui install
+    rustup target add {{target_macos}} {{target_linux}} {{target_windows}}
+
+# 开发模式: vite + tauri 热更新
+dev:
+    cd "{{app_dir}}" && "{{tauri}}" dev
+
+# 打开最近一次 macOS 产物 (优先带 --target 的路径)
+open:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    triple="{{root}}/target/{{target_macos}}/release/bundle/macos/Dash Download.app"
+    host="{{root}}/target/release/bundle/macos/Dash Download.app"
+    if [[ -d "$triple" ]]; then
+      open "$triple"
+    elif [[ -d "$host" ]]; then
+      open "$host"
+    else
+      echo "未找到 .app, 先跑: just macos-arm" >&2
+      exit 1
+    fi
+
+# 编译 macOS arm64 (.app)
+macos-arm:
+    rustup target add {{target_macos}}
+    cd "{{app_dir}}" && "{{tauri}}" build --target {{target_macos}} --bundles app
+    @echo "→ {{root}}/target/{{target_macos}}/release/bundle/macos/Dash Download.app"
+
+# 编译 Linux x86_64 (deb). 在非 Linux 主机上需要对应 linker / webkit sysroot, 本机 mac 上通常编不过
+linux-x86:
+    rustup target add {{target_linux}}
+    cd "{{app_dir}}" && "{{tauri}}" build --target {{target_linux}} --bundles deb
+    @echo "→ {{root}}/target/{{target_linux}}/release/bundle/deb/"
+
+# 编译 Windows x86_64 (nsis). 在非 Windows 主机上需要 cargo-xwin 或 msvc sysroot
+windows-x86:
+    rustup target add {{target_windows}}
+    cd "{{app_dir}}" && "{{tauri}}" build --target {{target_windows}} --bundles nsis
+    @echo "→ {{root}}/target/{{target_windows}}/release/bundle/nsis/"

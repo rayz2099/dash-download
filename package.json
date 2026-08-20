@@ -1,0 +1,13 @@
+{
+  "name": "dash-download",
+  "private": true,
+  "license": "Apache-2.0",
+  "scripts": {
+    "tauri": "tauri",
+    "dev:ui": "pnpm --dir ui dev",
+    "build:ui": "pnpm --dir ui build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "Dash Download",
+  "version": "0.1.0",
+  "description": "接管浏览器下载, 转发给 Dash Download 进行多连接加速下载",
+  "permissions": ["downloads", "storage", "contextMenus", "cookies", "notifications"],
+  "host_permissions": ["http://127.0.0.1:41320/*", "<all_urls>"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "32": "icons/32.png",
+      "128": "icons/128.png"
+    }
+  },
+  "icons": {
+    "32": "icons/32.png",
+    "128": "icons/128.png"
+  }
+}

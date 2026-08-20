@@ -1,0 +1,19 @@
+{
+  "name": "dd-ui",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "preact": "^10"
+  },
+  "devDependencies": {
+    "@preact/preset-vite": "^2",
+    "typescript": "^5",
+    "vite": "^7"
+  }
+}

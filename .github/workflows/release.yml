@@ -1,0 +1,145 @@
+# tag 形如 v1.0 / v1.0.0 时分别打包桌面安装包和 Chrome 扩展, 并只保留最新 3 个 GitHub Release.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    outputs:
+      release_id: ${{ steps.create.outputs.release_id }}
+    steps:
+      - id: create
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = context.ref.replace("refs/tags/", "");
+            const body = {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: tag,
+              name: `Dash Download ${tag}`,
+              generate_release_notes: true,
+            };
+            let release;
+            try {
+              release = (await github.rest.repos.createRelease(body)).data;
+            } catch (err) {
+              const existing = await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag,
+              });
+              release = existing.data;
+            }
+            core.setOutput("release_id", String(release.id));
+
+  app:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - host: macos-latest
+            rust_target: aarch64-apple-darwin
+            args: --target aarch64-apple-darwin --bundles app,dmg
+          - host: ubuntu-22.04
+            rust_target: x86_64-unknown-linux-gnu
+            args: --target x86_64-unknown-linux-gnu --bundles deb
+          - host: windows-latest
+            rust_target: x86_64-pc-windows-msvc
+            args: --target x86_64-pc-windows-msvc --bundles nsis
+    runs-on: ${{ matrix.host }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux webkit deps
+        if: matrix.host == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+
+      - name: Install JS deps
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --dir ui install --frozen-lockfile
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: crates/app
+          tagName: ${{ github.ref_name }}
+          releaseName: Dash Download ${{ github.ref_name }}
+          releaseId: ${{ needs.prepare.outputs.release_id }}
+          args: ${{ matrix.args }}
+
+  extension:
+    needs: prepare
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pack Chrome extension zip
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          mkdir -p dist-ext/dash-download-chrome
+          cp -R extension/. dist-ext/dash-download-chrome/
+          (cd dist-ext && zip -r "../dash-download-chrome-${tag}.zip" dash-download-chrome)
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: dash-download-chrome-${{ github.ref_name }}.zip
+
+  prune:
+    needs: [app, extension]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const { data: releases } = await github.rest.repos.listReleases({
+              owner,
+              repo,
+              per_page: 100,
+            });
+            const published = releases.filter((item) => !item.draft);
+            for (const stale of published.slice(3)) {
+              await github.rest.repos.deleteRelease({
+                owner,
+                repo,
+                release_id: stale.id,
+              });
+              try {
+                await github.rest.git.deleteRef({
+                  owner,
+                  repo,
+                  ref: `tags/${stale.tag_name}`,
+                });
+              } catch (err) {
+                core.warning(`delete tag ${stale.tag_name}: ${err.message}`);
+              }
+            }

@@ -20,7 +20,7 @@
 
 ## v0.3 — 三端分发
 
-justfile 已挂 `macos-arm` / `linux-x86` / `windows-x86`, 但 Linux/Windows 的 Tauri 壳与签名还没在对应主机上跑通.
+tag (`v*`) 会走 `.github/workflows/release.yml`: 分平台打 app 包 + Chrome zip, GitHub Release 只留最新 3 个. justfile 本地配方仍在. Linux/Windows 的 Tauri 壳与 macOS 公证还没在对应主机上跑通.
 
 - Linux x86_64: deb 包, 托盘与文件管理器 (xdg-open)
 - Windows x86_64: NSIS 安装包, 托盘, 资源管理器定位

@@ -25,3 +25,6 @@ Thumbs.db
 
 # 设计稿工具元数据
 designs/**/_d_meta.json
+
+# 浏览器自动化快照
+.playwright-mcp/

@@ -2,6 +2,8 @@
 // Chrome downloads 项常把地址改写成 blob:null/<uuid>, 所以按 uuid 缓存 Blob 本体.
 // 不向页面暴露 "写下载目录" 入口: CustomEvent 可被网页伪造, 只在 SW 按 chrome.downloads 回读字节.
 (() => {
+  // 与引擎 MAX_IMPORT_BYTES / JSON body 32MB 对齐, 回读前拒绝以免整份 arrayBuffer+b64
+  const MAX_INLINE_BYTES = 24 * 1024 * 1024;
   const blobs = new Map();
 
   function blobId(url) {
@@ -41,15 +43,24 @@
     return btoa(s);
   }
 
+  function tooLarge(n) {
+    return Number.isFinite(n) && n > MAX_INLINE_BYTES;
+  }
+
   async function readUrl(url) {
     const id = blobId(url);
     const blob = blobs.get(id);
     if (blob) {
+      if (tooLarge(blob.size)) throw new Error("blob 过大: " + blob.size);
       const buf = await blob.arrayBuffer();
+      if (tooLarge(buf.byteLength)) throw new Error("blob 过大: " + buf.byteLength);
       return { mime: blob.type || "", b64: b64(buf) };
     }
     const r = await fetch(url);
+    const len = Number(r.headers.get("content-length"));
+    if (tooLarge(len)) throw new Error("blob 过大: " + len);
     const buf = await r.arrayBuffer();
+    if (tooLarge(buf.byteLength)) throw new Error("blob 过大: " + buf.byteLength);
     return { mime: r.headers.get("content-type") || "", b64: b64(buf) };
   }
 

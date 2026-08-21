@@ -1,7 +1,7 @@
 use crate::error::{CoreError, Result};
 use crate::probe::{probe, sanitize};
 use crate::runner::{plan_segments, replan_remaining, run_segment, run_stream, SegOutcome};
-use crate::settings::{EngineSettings, ProxyCfg, ProxyKind, ProxyProbe, MAX_CONN};
+use crate::settings::{EngineSettings, ProxyCfg, ProxyKind, ProxyProbe, MAX_CONN, MAX_IMPORT_BYTES};
 use crate::store::Store;
 use crate::types::{
     AddTaskOptions, EngineEvent, RequestContext, SegmentInfo, TaskInfo, TaskProgress, TaskState,
@@ -182,6 +182,12 @@ impl Engine {
         mime: Option<String>,
         bytes: &[u8],
     ) -> Result<TaskInfo> {
+        if bytes.len() > MAX_IMPORT_BYTES {
+            return Err(CoreError::Other(format!(
+                "导入内容过大: {} > {MAX_IMPORT_BYTES} 字节",
+                bytes.len()
+            )));
+        }
         let live = self.inner.live.lock().unwrap().clone();
         let dir = live.default_dir.clone();
         std::fs::create_dir_all(&dir)?;
@@ -810,6 +816,16 @@ mod tests {
             .unwrap();
         assert_eq!(task.name, "download.webp");
         assert_eq!(task.state, TaskState::Completed);
+    }
+
+    #[tokio::test]
+    async fn import_bytes_rejects_over_max() {
+        let eng = tmp_engine();
+        let bytes = vec![0u8; MAX_IMPORT_BYTES + 1];
+        let err = eng
+            .import_bytes("blob:https://example/x", None, None, &bytes)
+            .unwrap_err();
+        assert!(err.to_string().contains("过大"));
     }
 
     #[tokio::test]

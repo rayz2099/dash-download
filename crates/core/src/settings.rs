@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 /// 每任务连接数 / 同时下载数上限. 再高对 TCP 与文件句柄没有收益.
 pub const MAX_CONN: u32 = 128;
 
+/// blob/data 直写上限. JSON base64 约 4/3, 对齐 app DefaultBodyLimit 32MB.
+pub const MAX_IMPORT_BYTES: usize = 24 * 1024 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProxyKind {

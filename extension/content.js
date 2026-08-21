@@ -1,14 +1,5 @@
 // isolated: 只转发 SW 指定的 blob 回读. 不听页面 CustomEvent 写任务, 那条路可被网页伪造.
 // match_origin_as_fallback 让这段脚本进 origin=null 的沙箱 iframe.
-function setFlag(on) {
-  document.documentElement.setAttribute("data-dd-takeover", on ? "1" : "0");
-}
-setFlag(true);
-chrome.storage.local.get({ enabled: true }, (cfg) => setFlag(!!cfg.enabled));
-chrome.storage.onChanged.addListener((ch, area) => {
-  if (area === "local" && ch.enabled) setFlag(!!ch.enabled.newValue);
-});
-
 const pendingSeen = [];
 
 function postPort(msg) {

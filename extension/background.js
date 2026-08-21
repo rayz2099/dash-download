@@ -118,6 +118,9 @@ async function sendToApp(url, extra) {
   const headers = extra.contentB64 ? [] : await buildHeaders(url, extra.referrer);
   const body = { url, name: extra.filename, headers };
   if (extra.contentB64) {
+    if (inlineTooLarge(Math.floor(extra.contentB64.length * 3 / 4))) {
+      throw new Error("导入内容过大");
+    }
     body.content_b64 = extra.contentB64;
     body.mime = extra.mime || "";
   }

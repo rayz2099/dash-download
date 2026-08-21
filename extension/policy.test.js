@@ -7,6 +7,8 @@ const {
   blobId,
   itemKey,
   hostDenied,
+  inlineTooLarge,
+  MAX_INLINE_BYTES,
 } = require("./policy.js");
 
 test("大文件接管", () => {
@@ -96,4 +98,10 @@ test("hostDenied", () => {
   assert.equal(hostDenied("a.evil.com", ["evil.com"]), true);
   assert.equal(hostDenied("evil.com", ["evil.com"]), true);
   assert.equal(hostDenied("not-evil.com", ["evil.com"]), false);
+});
+
+test("inline 上限 24MB, 对齐引擎导入", () => {
+  assert.equal(MAX_INLINE_BYTES, 24 * 1024 * 1024);
+  assert.equal(inlineTooLarge(MAX_INLINE_BYTES), false);
+  assert.equal(inlineTooLarge(MAX_INLINE_BYTES + 1), true);
 });

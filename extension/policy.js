@@ -1,6 +1,8 @@
 // 纯策略, 给 SW importScripts 与 node:test 共用.
 (function (g) {
   const MIN_BYTES = 1024 * 1024;
+  /// 与引擎 MAX_IMPORT_BYTES 对齐. JSON base64 约 4/3, app body 上限 32MB.
+  const MAX_INLINE_BYTES = 24 * 1024 * 1024;
 
   function isBlobLike(url) {
     return /^(blob|data|filesystem):/i.test(url || "");
@@ -74,13 +76,26 @@
     const meta = url.slice(5, i);
     const data = url.slice(i + 1);
     const mime = (meta.split(";")[0] || "").trim();
-    if (/;base64/i.test(meta)) return { mime, b64: data };
-    const raw = decodeURIComponent(data);
-    return { mime, b64: btoa(unescape(raw)) };
+    let b64;
+    if (/;base64/i.test(meta)) {
+      b64 = data;
+    } else {
+      const raw = decodeURIComponent(data);
+      b64 = btoa(unescape(raw));
+    }
+    if (inlineTooLarge(Math.floor(b64.length * 3 / 4))) {
+      throw new Error("data URL 过大");
+    }
+    return { mime, b64 };
+  }
+
+  function inlineTooLarge(n) {
+    return Number.isFinite(n) && n > MAX_INLINE_BYTES;
   }
 
   const api = {
-    isBlobLike, blobId, itemKey, shouldTakeover, decodeDataUrl, hostOf, hostDenied, itemBytes, MIN_BYTES,
+    isBlobLike, blobId, itemKey, shouldTakeover, decodeDataUrl, hostOf, hostDenied, itemBytes,
+    inlineTooLarge, MIN_BYTES, MAX_INLINE_BYTES,
   };
   g.ddPolicy = api;
   g.isBlobLike = isBlobLike;

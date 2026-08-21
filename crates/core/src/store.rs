@@ -26,6 +26,8 @@ impl Store {
                 dir TEXT NOT NULL,
                 size INTEGER,
                 resumable INTEGER NOT NULL DEFAULT 0,
+                http_status INTEGER NOT NULL DEFAULT 0,
+                range_ignored INTEGER NOT NULL DEFAULT 0,
                 state TEXT NOT NULL,
                 done INTEGER NOT NULL DEFAULT 0,
                 error TEXT NOT NULL DEFAULT '',
@@ -45,6 +47,14 @@ impl Store {
         // 已有库补列: 已存在时 ALTER 失败, 忽略即可
         let _ = conn.execute(
             "ALTER TABLE task ADD COLUMN max_segments INTEGER NOT NULL DEFAULT 8",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE task ADD COLUMN http_status INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE task ADD COLUMN range_ignored INTEGER NOT NULL DEFAULT 0",
             [],
         );
         Ok(Store { conn })
@@ -100,10 +110,30 @@ impl Store {
         name: &str,
         size: Option<u64>,
         resumable: bool,
+        http_status: u16,
+        range_ignored: bool,
     ) -> Result<()> {
         self.conn.execute(
-            "UPDATE task SET final_url = ?2, name = ?3, size = ?4, resumable = ?5 WHERE id = ?1",
-            params![id, final_url, name, size.map(|s| s as i64), resumable as i64],
+            "UPDATE task SET final_url = ?2, name = ?3, size = ?4, resumable = ?5,
+             http_status = ?6, range_ignored = ?7 WHERE id = ?1",
+            params![
+                id,
+                final_url,
+                name,
+                size.map(|s| s as i64),
+                resumable as i64,
+                http_status as i64,
+                range_ignored as i64
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// 探测失败也要留下状态码, 否则 Failed 任务只剩 reqwest 英文长句
+    pub fn save_http(&self, id: i64, status: u16, range_ignored: bool) -> Result<()> {
+        self.conn.execute(
+            "UPDATE task SET http_status = ?2, range_ignored = ?3 WHERE id = ?1",
+            params![id, status as i64, range_ignored as i64],
         )?;
         Ok(())
     }
@@ -153,7 +183,7 @@ impl Store {
     pub fn reset_task(&self, id: i64) -> Result<()> {
         self.conn.execute(
             "UPDATE task SET done = 0, error = '', completed_at = NULL,
-             size = NULL, resumable = 0 WHERE id = ?1",
+             size = NULL, resumable = 0, http_status = 0, range_ignored = 0 WHERE id = ?1",
             params![id],
         )?;
         self.conn.execute("DELETE FROM segment WHERE task_id = ?1", params![id])?;
@@ -191,7 +221,8 @@ impl Store {
     fn query_tasks(&self, id: Option<i64>) -> Result<Vec<TaskInfo>> {
         let sql = format!(
             "SELECT id, url, final_url, name, dir, size, resumable, state, done, error,
-                    headers_json, created_at, completed_at, max_segments
+                    headers_json, created_at, completed_at, max_segments,
+                    http_status, range_ignored
              FROM task {} ORDER BY id DESC",
             if id.is_some() { "WHERE id = ?1" } else { "" }
         );
@@ -213,6 +244,8 @@ impl Store {
                 created_at: row.get(11)?,
                 completed_at: row.get(12)?,
                 max_segments: row.get::<_, i64>(13).unwrap_or(8) as u32,
+                http_status: row.get::<_, i64>(14)? as u16,
+                range_ignored: row.get::<_, i64>(15)? != 0,
             })
         };
         let mut tasks: Vec<TaskInfo> = if let Some(id) = id {

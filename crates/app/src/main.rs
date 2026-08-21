@@ -123,15 +123,35 @@ fn config_dir() -> PathBuf {
         .join("dash-download")
 }
 
-fn main() {
+fn is_nm_host() -> bool {
     if std::env::args().any(|a| a == "--native-host") {
+        return true;
+    }
+    // Windows 不能在 manifest path 里带参数, 复制出的 nm-host.exe 靠文件名进这个模式
+    match std::env::current_exe() {
+        Ok(p) => p
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .is_some_and(|s| s.eq_ignore_ascii_case("nm-host")),
+        Err(_) => false,
+    }
+}
+
+fn main() {
+    if is_nm_host() {
         launch::run_native_host();
         return;
     }
 
     let cfg_dir = config_dir();
     let _ = std::fs::create_dir_all(&cfg_dir);
-    let user_prefs = prefs::Store::load(&cfg_dir);
+    let user_prefs = match prefs::Store::load(&cfg_dir) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
     let snapshot = user_prefs.get();
     let download_dir = if snapshot.default_dir.trim().is_empty() {
         dirs::download_dir()

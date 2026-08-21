@@ -203,7 +203,7 @@ impl Engine {
                 &RequestContext::default(),
                 1,
             )?;
-            store.update_probe(id, url, &final_name, Some(size), false)?;
+            store.update_probe(id, url, &final_name, Some(size), false, 0, false)?;
             store.checkpoint(id, size, &[])?;
             store.set_state(id, TaskState::Completed, "")?;
             id
@@ -322,13 +322,17 @@ impl Engine {
     }
 
     /// 热更新并发 / 目录 / 代理. 已在跑的 Task 仍持有旧 Client, 暂停再续才走新代理.
+    /// 不在这里 schedule: 调用方必须先落盘, 否则写盘失败无法收回已启动的任务.
     pub fn apply_settings(&self, next: EngineSettings) -> Result<EngineSettings> {
         next.validate()?;
         let client = build_client(&self.inner.cfg.user_agent, &next.proxy)?;
         *self.inner.client.lock().unwrap() = client;
         *self.inner.live.lock().unwrap() = next.clone();
-        self.inner.clone().schedule();
         Ok(next)
+    }
+
+    pub fn pump_queue(&self) {
+        self.inner.clone().schedule();
     }
 
     /// 用原链接重新下载 (NDM 的 Redownload): 清进度重新排队.
@@ -476,6 +480,10 @@ impl Inner {
         self.running.lock().unwrap().remove(&id);
         self.speeds.lock().unwrap().remove(&id);
         if let Err(e) = outcome {
+            // 只把探测失败的状态码写入诊断字段. 分段/单流 HTTP 错误不能盖掉探测结果.
+            if let CoreError::ProbeHttp(st) = &e {
+                let _ = self.store.lock().unwrap().save_http(id, *st, false);
+            }
             let _ = self.set_state_emit(id, TaskState::Failed, &e.to_string());
         }
         self.clone().schedule();
@@ -503,7 +511,15 @@ impl Inner {
             };
             {
                 let store = self.store.lock().unwrap();
-                store.update_probe(id, &p.final_url, &name, p.size, p.resumable)?;
+                store.update_probe(
+                    id,
+                    &p.final_url,
+                    &name,
+                    p.size,
+                    p.resumable,
+                    p.http_status,
+                    p.range_ignored,
+                )?;
                 store.replace_segments(id, &segs)?;
             }
             self.store.lock().unwrap().get_task(id)?.ok_or(CoreError::NotFound(id))?

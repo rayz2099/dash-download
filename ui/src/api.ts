@@ -20,6 +20,8 @@ export interface TaskInfo {
   dir: string;
   size: number | null;
   resumable: boolean;
+  http_status: number;
+  range_ignored: boolean;
   state: TaskState;
   done: number;
   speed: number;
@@ -161,6 +163,7 @@ export interface ProxyCfg {
   auth: boolean;
   user: string;
   pass: string;
+  pass_set?: boolean;
 }
 
 export interface EngineSettings {

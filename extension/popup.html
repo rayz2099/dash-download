@@ -42,6 +42,14 @@ h1 { font-size: 14px; font-weight: 600; margin-bottom: 14px; display: flex; alig
 }
 .toggle.on::after { left: 17px; }
 .footer { margin-top: 4px; font-size: 12px; color: var(--text-2); line-height: 1.5; }
+.field { margin-top: 10px; }
+.field label { display: block; font-size: 13px; }
+.field input, .field textarea {
+  width: 100%; margin-top: 6px; padding: 6px 8px;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: var(--panel); color: var(--text-1); font: inherit;
+}
+.field textarea { resize: vertical; min-height: 56px; }
 </style>
 </head>
 <body>
@@ -53,11 +61,21 @@ h1 { font-size: 14px; font-weight: 600; margin-bottom: 14px; display: flex; alig
   <div class="row">
     <div>
       <div>接管浏览器下载</div>
-      <div class="hint">接管全部下载, 含页面 blob</div>
+      <div class="hint">HTML / 低于阈值 / 黑名单域名留给浏览器</div>
     </div>
     <button class="toggle" id="toggle"></button>
   </div>
-  <div class="footer">app 未运行时会尝试拉起; 拉不起则下载留在浏览器. 建议打开开机自启. 右键链接可手动发送.</div>
+  <div class="field">
+    <label>最小体积 (MB)</label>
+    <div class="hint">已知体积低于此值不接管. 0 表示不按体积过滤.</div>
+    <input id="minMb" type="number" min="0" step="1" />
+  </div>
+  <div class="field">
+    <label>域名黑名单</label>
+    <div class="hint">一行一个 host, 匹配自身和子域.</div>
+    <textarea id="deny" placeholder="example.com"></textarea>
+  </div>
+  <div class="footer">app 未运行时走 native host 拉起再接管; 拉不起则不 abort. 右键链接手动发送不受过滤.</div>
   <script src="popup.js"></script>
 </body>
 </html>

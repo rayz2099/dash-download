@@ -10,48 +10,26 @@ use std::time::{Duration, Instant};
 
 pub const HOST_NAME: &str = "dev.ray.dash_download";
 /// 扩展 manifest.key 算出的稳定 ID, 未连上 API 也能写进 native host 白名单.
+pub const EXT_ID: &str = "agdjpgikicokkkbdgmdmhdpbhljieech";
 pub const EXT_ORIGIN: &str = "chrome-extension://agdjpgikicokkkbdgmdmhdpbhljieech/";
 
-fn origins_file(cfg_dir: &Path) -> PathBuf {
-    cfg_dir.join("ext-origins.json")
+/// Chrome 的 Origin 通常无尾斜杠, native host 白名单必须有; 两者都认成本扩展.
+pub fn is_our_ext_origin(origin: &str) -> bool {
+    origin
+        .trim()
+        .trim_end_matches('/')
+        .strip_prefix("chrome-extension://")
+        == Some(EXT_ID)
 }
 
-pub fn load_origins(cfg_dir: &Path) -> Vec<String> {
-    let mut out = vec![EXT_ORIGIN.to_string()];
-    if let Ok(raw) = std::fs::read_to_string(origins_file(cfg_dir)) {
-        if let Ok(extra) = serde_json::from_str::<Vec<String>>(&raw) {
-            for o in extra {
-                if !out.contains(&o) {
-                    out.push(o);
-                }
-            }
-        }
-    }
-    out
+pub fn load_origins(_cfg_dir: &Path) -> Vec<String> {
+    vec![EXT_ORIGIN.to_string()]
 }
 
-/// 扩展连上之后登记 origin, 下次没跑 app 时 native host 仍允许该扩展拉起.
+/// 扩展连上后重装 native host. 只接受本扩展, 避免任意扩展把自己写进白名单.
 pub fn remember_origin(cfg_dir: &Path, origin: &str) -> Result<(), String> {
-    if !origin.starts_with("chrome-extension://") {
-        return Err("origin 必须是 chrome-extension://".into());
-    }
-    let origin = if origin.ends_with('/') {
-        origin.to_string()
-    } else {
-        format!("{origin}/")
-    };
-    let mut all = load_origins(cfg_dir);
-    if !all.contains(&origin) {
-        all.push(origin);
-        let extra: Vec<String> = all
-            .into_iter()
-            .filter(|o| o != EXT_ORIGIN)
-            .collect();
-        std::fs::write(
-            origins_file(cfg_dir),
-            serde_json::to_string_pretty(&extra).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
+    if !is_our_ext_origin(origin) {
+        return Err("origin 不是本扩展".into());
     }
     install_native_host(cfg_dir)
 }
@@ -65,13 +43,18 @@ fn exe_path() -> Result<PathBuf, String> {
     std::env::current_exe().map_err(|e| e.to_string())
 }
 
-/// Chrome 在 Unix 上不允许 path 带参数, 所以写一个只转调 `--native-host` 的包装脚本.
+/// Chrome 的 native host `path` 不能带参数.
+/// Unix 写包装脚本; Windows 复制一份名为 nm-host 的 exe, 入口靠文件名进 native host 模式.
 fn host_bin(cfg_dir: &Path) -> Result<PathBuf, String> {
     let exe = exe_path()?;
     #[cfg(windows)]
     {
-        let _ = cfg_dir;
-        return Ok(exe);
+        // 副本靠文件名进 host 模式, 必须另记 GUI 路径, 否则 spawn 会再 exec 自己
+        std::fs::write(cfg_dir.join("gui-exe.txt"), exe.to_string_lossy().as_bytes())
+            .map_err(|e| e.to_string())?;
+        let wrap = cfg_dir.join("nm-host.exe");
+        copy_if_stale(&exe, &wrap)?;
+        return Ok(wrap);
     }
     #[cfg(not(windows))]
     {
@@ -86,11 +69,24 @@ fn host_bin(cfg_dir: &Path) -> Result<PathBuf, String> {
     }
 }
 
+#[cfg(windows)]
+fn copy_if_stale(src: &Path, dst: &Path) -> Result<(), String> {
+    let src_meta = std::fs::metadata(src).map_err(|e| e.to_string())?;
+    let stale = match std::fs::metadata(dst) {
+        Err(_) => true,
+        Ok(dst_meta) => {
+            dst_meta.len() != src_meta.len()
+                || src_meta.modified().ok() > dst_meta.modified().ok()
+        }
+    };
+    if stale {
+        std::fs::copy(src, dst).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 fn host_json(cfg_dir: &Path) -> Result<Value, String> {
     let path = host_bin(cfg_dir)?;
-    #[cfg(windows)]
-    let path_s = format!("{} --native-host", path.display());
-    #[cfg(not(windows))]
     let path_s = path.to_string_lossy().into_owned();
     Ok(json!({
         "name": HOST_NAME,
@@ -101,12 +97,12 @@ fn host_json(cfg_dir: &Path) -> Result<Value, String> {
     }))
 }
 
-fn nm_dirs() -> Vec<PathBuf> {
-    let home = dirs::home_dir().unwrap_or_default();
+fn nm_dirs() -> Result<Vec<PathBuf>, String> {
     #[cfg(target_os = "macos")]
     {
+        let home = dirs::home_dir().ok_or("找不到 home 目录")?;
         let app_s = home.join("Library/Application Support");
-        return vec![
+        return Ok(vec![
             app_s.join("Google/Chrome/NativeMessagingHosts"),
             app_s.join("Google/Chrome Canary/NativeMessagingHosts"),
             app_s.join("Chromium/NativeMessagingHosts"),
@@ -114,23 +110,25 @@ fn nm_dirs() -> Vec<PathBuf> {
             app_s.join("BraveSoftware/Brave-Browser/NativeMessagingHosts"),
             app_s.join("Arc/NativeMessagingHosts"),
             app_s.join("Vivaldi/NativeMessagingHosts"),
-        ];
+        ]);
     }
     #[cfg(target_os = "linux")]
     {
+        let home = dirs::home_dir().ok_or("找不到 home 目录")?;
         let cfg = home.join(".config");
-        return vec![
+        return Ok(vec![
             cfg.join("google-chrome/NativeMessagingHosts"),
             cfg.join("google-chrome-beta/NativeMessagingHosts"),
             cfg.join("chromium/NativeMessagingHosts"),
             cfg.join("microsoft-edge/NativeMessagingHosts"),
             cfg.join("BraveSoftware/Brave-Browser/NativeMessagingHosts"),
             cfg.join("vivaldi/NativeMessagingHosts"),
-        ];
+        ]);
     }
     #[cfg(windows)]
     {
-        vec![dirs::config_dir().unwrap_or_default().join("dash-download")]
+        let cfg = dirs::config_dir().ok_or("找不到 config 目录")?;
+        Ok(vec![cfg.join("dash-download")])
     }
 }
 
@@ -138,7 +136,7 @@ pub fn install_native_host(cfg_dir: &Path) -> Result<(), String> {
     let _ = std::fs::create_dir_all(cfg_dir);
     let spec = host_json(cfg_dir)?;
     let name = format!("{HOST_NAME}.json");
-    for dir in nm_dirs() {
+    for dir in nm_dirs()? {
         let _ = std::fs::create_dir_all(&dir);
         let dest = dir.join(&name);
         std::fs::write(&dest, serde_json::to_vec_pretty(&spec).map_err(|e| e.to_string())?)
@@ -161,8 +159,30 @@ pub fn install_native_host(cfg_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn spawn_gui() -> Result<(), String> {
+/// nm-host.exe 是 GUI 的副本, 再 exec current_exe 会递归进 native host.
+fn gui_exe() -> Result<PathBuf, String> {
     let exe = exe_path()?;
+    let is_nm = exe
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .is_some_and(|s| s.eq_ignore_ascii_case("nm-host"));
+    if !is_nm {
+        return Ok(exe);
+    }
+    let ptr = exe
+        .parent()
+        .ok_or("nm-host.exe 无父目录")?
+        .join("gui-exe.txt");
+    let raw = std::fs::read_to_string(&ptr).map_err(|e| format!("读 gui-exe.txt 失败: {e}"))?;
+    let path = PathBuf::from(raw.trim());
+    if !path.is_file() {
+        return Err(format!("GUI 可执行文件不存在: {}", path.display()));
+    }
+    Ok(path)
+}
+
+fn spawn_gui() -> Result<(), String> {
+    let exe = gui_exe()?;
     #[cfg(target_os = "macos")]
     {
         if let Some(bundle) = exe.ancestors().find(|p| p.extension().map(|e| e == "app").unwrap_or(false)) {

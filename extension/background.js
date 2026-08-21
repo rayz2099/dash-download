@@ -3,19 +3,23 @@ importScripts("policy.js");
 
 const API = "http://127.0.0.1:41320";
 const NATIVE = "dev.ray.dash_download";
-const DEFAULTS = { enabled: true };
+const DEFAULTS = { enabled: true, minBytes: 1024 * 1024, denyHosts: [] };
 
 let cached = { ...DEFAULTS };
 const inflight = new Set();
 const sent = new Set();
-const pages = new Set();
+const pages = new Map(); // port -> { blobs: Set }
 
 chrome.storage.local.get(DEFAULTS, (cfg) => {
-  cached = { enabled: cfg.enabled };
+  cached.enabled = cfg.enabled;
+  cached.minBytes = cfg.minBytes;
+  cached.denyHosts = cfg.denyHosts;
 });
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;
   if (changes.enabled) cached.enabled = changes.enabled.newValue;
+  if (changes.minBytes) cached.minBytes = changes.minBytes.newValue;
+  if (changes.denyHosts) cached.denyHosts = changes.denyHosts.newValue;
 });
 
 function sleep(ms) {
@@ -127,19 +131,25 @@ async function sendToApp(url, extra) {
 
 function readBlob(url) {
   return new Promise((resolve, reject) => {
-    if (pages.size === 0) {
-      reject(new Error("页面脚本未注入, 读不了 blob:null"));
+    const id = blobId(url);
+    const targets = [];
+    for (const [port, st] of pages) {
+      if (st.blobs.has(id)) targets.push(port);
+    }
+    // 只问声明持有该 uuid 的页面. 广播会被其它 Tab 伪造 dd-read-ok 抢答.
+    if (targets.length === 0) {
+      reject(new Error("没有页面持有该 blob"));
       return;
     }
     const req = String(Date.now()) + Math.random();
-    let left = pages.size;
+    let left = targets.length;
     let settled = false;
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
       reject(new Error("无法读取 " + url));
     }, 4000);
-    for (const port of pages) {
+    for (const port of targets) {
       const onMsg = (msg) => {
         if (msg.op !== "read-blob-ok" || msg.req !== req) return;
         port.onMessage.removeListener(onMsg);
@@ -198,7 +208,7 @@ function takeover(item) {
   const url = item.finalUrl || item.url;
   const key = itemKey(url);
   if (!cached.enabled) return;
-  if (!shouldTakeover(item)) return;
+  if (!shouldTakeover(item, cached)) return;
   if (sent.has(key)) {
     abortChrome(item.id);
     return;
@@ -224,35 +234,12 @@ function takeover(item) {
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "dd-page") return;
-  pages.add(port);
-  port.onDisconnect.addListener(() => pages.delete(port));
-});
-
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (!msg || msg.op !== "captured") return;
-  sendResponse({ ok: true });
-  if (msg.error || !msg.b64) {
-    console.warn("页面捕获失败:", msg.error);
-    return;
-  }
-  if (!cached.enabled) return;
-  const key = itemKey(msg.url);
-  if (sent.has(key) || inflight.has(key)) return;
-  inflight.add(key);
-  setTimeout(() => inflight.delete(key), 12000);
-  ensureApp().then(async (ok) => {
-    if (!ok) throw new Error("无法拉起 Dash Download");
-    await captureUrl(msg.url, {
-      filename: msg.name,
-      contentB64: msg.b64,
-      mime: msg.mime,
-      referrer: msg.referrer || (sender.tab && sender.tab.url),
-    });
-    sent.add(key);
-  }).catch((e) => {
-    console.warn("接管失败:", e);
-    notify("接管失败", e && e.message ? e.message : e);
+  const st = { blobs: new Set() };
+  pages.set(port, st);
+  port.onMessage.addListener((msg) => {
+    if (msg && msg.op === "blob-seen" && msg.id) st.blobs.add(String(msg.id));
   });
+  port.onDisconnect.addListener(() => pages.delete(port));
 });
 
 chrome.downloads.onCreated.addListener((item) => takeover(item));

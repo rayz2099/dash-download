@@ -95,7 +95,7 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: Dash Download ${{ github.ref_name }}
           releaseId: ${{ needs.prepare.outputs.release_id }}
-          includeUpdaterJson: true
+          includeUpdaterJson: false
           args: ${{ matrix.args }}
 
 
@@ -134,15 +134,24 @@ jobs:
               pair("linux-x86_64", /\.AppImage$/, /\.AppImage\.sig$/),
               pair("windows-x86_64", /\.nsis\.zip$/, /\.nsis\.zip\.sig$/),
             ])).filter(Boolean);
-            if (!entries.length) {
-              throw new Error("Release 上没有带签名的 updater 包, 无法写 latest.json");
+            const platforms = Object.fromEntries(entries);
+            const missing = ["darwin-aarch64", "linux-x86_64", "windows-x86_64"]
+              .filter((k) => !platforms[k]);
+            if (missing.length) {
+              const leftover = assets.find((a) => a.name === "latest.json");
+              if (leftover) {
+                await github.rest.repos.deleteReleaseAsset({
+                  owner, repo, asset_id: leftover.id,
+                });
+              }
+              throw new Error("latest.json 缺平台, 已删除残缺清单: " + missing.join(","));
             }
             const version = tag.replace(/^v/, "");
             const body = {
               version,
               notes: tag,
               pub_date: new Date().toISOString(),
-              platforms: Object.fromEntries(entries),
+              platforms,
             };
             const old = assets.find((a) => a.name === "latest.json");
             if (old) {

@@ -54,18 +54,32 @@ pub fn path(cfg_dir: &Path) -> PathBuf {
     cfg_dir.join("prefs.json")
 }
 
-pub fn load(cfg_dir: &Path) -> Prefs {
+pub fn load(cfg_dir: &Path) -> Result<Prefs, String> {
     let p = path(cfg_dir);
-    let Ok(raw) = std::fs::read_to_string(&p) else {
-        return Prefs::default();
-    };
-    serde_json::from_str(&raw).unwrap_or_default()
+    match std::fs::read_to_string(&p) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Prefs::default()),
+        Err(e) => Err(format!("读 prefs.json 失败: {e}")),
+        Ok(raw) => serde_json::from_str(&raw)
+            .map_err(|e| format!("prefs.json 损坏, 拒绝用默认值覆盖: {e}")),
+    }
 }
 
 pub fn save(cfg_dir: &Path, prefs: &Prefs) -> Result<(), String> {
     let p = path(cfg_dir);
+    let tmp = cfg_dir.join("prefs.json.tmp");
     let raw = serde_json::to_string_pretty(prefs).map_err(|e| e.to_string())?;
-    std::fs::write(&p, raw).map_err(|e| e.to_string())
+    std::fs::write(&tmp, &raw).map_err(|e| e.to_string())?;
+    #[cfg(windows)]
+    {
+        // Windows rename 不能覆盖已有文件; copy 覆盖可让旧 prefs.json 始终在盘上
+        std::fs::copy(&tmp, &p).map_err(|e| e.to_string())?;
+        let _ = std::fs::remove_file(&tmp);
+        return Ok(());
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::rename(&tmp, &p).map_err(|e| e.to_string())
+    }
 }
 
 /// 进程内唯一偏好句柄. updater 与 /api/settings 必须走这里写盘.
@@ -76,11 +90,11 @@ pub struct Store {
 }
 
 impl Store {
-    pub fn load(cfg_dir: &Path) -> Self {
-        Self {
+    pub fn load(cfg_dir: &Path) -> Result<Self, String> {
+        Ok(Self {
             dir: cfg_dir.to_path_buf(),
-            inner: Arc::new(Mutex::new(load(cfg_dir))),
-        }
+            inner: Arc::new(Mutex::new(load(cfg_dir)?)),
+        })
     }
 
     pub fn get(&self) -> Prefs {
@@ -89,8 +103,10 @@ impl Store {
 
     pub fn patch<F: FnOnce(&mut Prefs)>(&self, f: F) -> Result<Prefs, String> {
         let mut g = self.inner.lock().expect("prefs mutex");
-        f(&mut g);
-        save(&self.dir, &g)?;
-        Ok(g.clone())
+        let mut next = g.clone();
+        f(&mut next);
+        save(&self.dir, &next)?;
+        *g = next.clone();
+        Ok(next)
     }
 }

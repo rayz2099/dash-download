@@ -13,7 +13,7 @@ use dd_core::{AddTaskOptions, CoreError, Engine, EngineSettings, ProxyCfg, Reque
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tauri::Manager;
@@ -85,13 +85,13 @@ pub async fn serve(ctx: Arc<ApiCtx>, port: u16) -> std::io::Result<()> {
     axum::serve(listener, app).await
 }
 
-/// 允许的浏览器 Origin: 本机 webview / vite / 任意 chrome 扩展.
-/// 恶意网页带自己的 Origin, 不在白名单, CORS 预检失败且中间件直接拒.
+/// 允许的浏览器 Origin: 本机 webview / vite / 本扩展 (manifest.key 算出的稳定 ID).
+/// 其它 chrome-extension:// 一律拒绝, 避免任意扩展读代理密码或写任务.
 fn origin_ok(origin: &HeaderValue) -> bool {
     let Ok(s) = origin.to_str() else {
         return false;
     };
-    s.starts_with("chrome-extension://")
+    crate::launch::is_our_ext_origin(s)
         || s == "http://localhost:5173"
         || s == "http://127.0.0.1:5173"
         || s == "https://tauri.localhost"
@@ -257,20 +257,40 @@ async fn remove_task(
 }
 
 
-async fn get_settings(State(ctx): State<Arc<ApiCtx>>) -> Json<EngineSettings> {
-    Json(ctx.engine.settings())
+async fn get_settings(State(ctx): State<Arc<ApiCtx>>) -> Json<Value> {
+    settings_json(ctx.engine.settings())
 }
 
-/// 写 prefs.json 与热更新引擎必须同一次成功, 避免 UI 显示已保存但下载仍走旧代理.
+/// GET 不回传明文密码, 只带 pass_set 让设置页知道已保存过.
+fn settings_json(s: EngineSettings) -> Json<Value> {
+    let pass_set = !s.proxy.pass.is_empty();
+    let mut s = s;
+    s.proxy.pass.clear();
+    let mut v = serde_json::to_value(&s).expect("settings 可序列化");
+    v["proxy"]["pass_set"] = json!(pass_set);
+    Json(v)
+}
+
+/// 写 prefs.json 与热更新引擎必须同一次成功.
+/// 先改内存再落盘; 落盘失败要把引擎滚回去, 否则 API 报错但下载已走新代理.
 async fn put_settings(
     State(ctx): State<Arc<ApiCtx>>,
-    Json(req): Json<EngineSettings>,
+    Json(mut req): Json<EngineSettings>,
 ) -> Result<Response, ApiError> {
+    let prev = ctx.engine.settings();
+    // 空密码表示沿用已存值, 避免设置页改目录时把代理密码写成空
+    if req.proxy.pass.is_empty() {
+        req.proxy.pass = prev.proxy.pass.clone();
+    }
     let applied = ctx.engine.apply_settings(req)?;
-    ctx.prefs
-        .patch(|p| p.apply_engine(&applied))
-        .map_err(|e| ApiError(CoreError::Other(e)))?;
-    Ok(Json(applied).into_response())
+    if let Err(e) = ctx.prefs.patch(|p| p.apply_engine(&applied)) {
+        ctx.engine
+            .apply_settings(prev)
+            .map_err(|rb| ApiError(CoreError::Other(format!("写盘失败 ({e}) 且回滚失败: {rb}"))))?;
+        return Err(ApiError(CoreError::Other(e)));
+    }
+    ctx.engine.pump_queue();
+    Ok(settings_json(applied).into_response())
 }
 
 
@@ -282,8 +302,12 @@ struct ProxyTestReq {
 
 async fn test_proxy(
     State(ctx): State<Arc<ApiCtx>>,
-    Json(req): Json<ProxyTestReq>,
+    Json(mut req): Json<ProxyTestReq>,
 ) -> Result<Response, ApiError> {
+    // GET 已抹掉明文; 测试时没改密码就用已存的, 否则已开认证的代理会假失败
+    if req.proxy.pass.is_empty() {
+        req.proxy.pass = ctx.engine.settings().proxy.pass;
+    }
     let r = ctx.engine.probe_url(&req.proxy, &req.url).await?;
     Ok(Json(r).into_response())
 }

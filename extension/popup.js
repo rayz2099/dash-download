@@ -1,11 +1,21 @@
 const API = "http://127.0.0.1:41320";
 const NATIVE = "dev.ray.dash_download";
+const DEFAULTS = { enabled: true, minBytes: 1024 * 1024, denyHosts: [] };
 const $ = (id) => document.getElementById(id);
 
-const state = { enabled: true };
+const state = { ...DEFAULTS };
 
 function renderToggle() {
   $("toggle").classList.toggle("on", state.enabled);
+}
+
+function renderRules() {
+  $("minMb").value = String(state.minBytes / (1024 * 1024));
+  $("deny").value = (state.denyHosts || []).join("\n");
+}
+
+function parseDeny(text) {
+  return text.split("\n").map((s) => s.trim()).filter(Boolean);
 }
 
 async function ping() {
@@ -36,15 +46,33 @@ async function checkHealth() {
   $("status").textContent = "app 未运行";
 }
 
-chrome.storage.local.get({ enabled: true }, (cfg) => {
+chrome.storage.local.get(DEFAULTS, (cfg) => {
   state.enabled = cfg.enabled;
+  state.minBytes = cfg.minBytes;
+  state.denyHosts = cfg.denyHosts;
   renderToggle();
+  renderRules();
 });
 
 $("toggle").addEventListener("click", () => {
   state.enabled = !state.enabled;
   chrome.storage.local.set({ enabled: state.enabled });
   renderToggle();
+});
+
+$("minMb").addEventListener("change", () => {
+  const n = Number($("minMb").value);
+  if (!Number.isFinite(n) || n < 0) {
+    renderRules();
+    return;
+  }
+  state.minBytes = Math.round(n * 1024 * 1024);
+  chrome.storage.local.set({ minBytes: state.minBytes });
+});
+
+$("deny").addEventListener("change", () => {
+  state.denyHosts = parseDeny($("deny").value);
+  chrome.storage.local.set({ denyHosts: state.denyHosts });
 });
 
 checkHealth();

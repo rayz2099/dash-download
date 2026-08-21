@@ -365,7 +365,8 @@ export function SettingsPage(props: {
                         </div>
                         <div class="field">
                           <label>密码</label>
-                          <input type="text" value={eng.proxy.pass}
+                          <input type="password" value={eng.proxy.pass}
+                            placeholder={eng.proxy.pass_set ? "已保存" : ""}
                             onInput={(e) => setEng({
                               ...eng, proxy: { ...eng.proxy, pass: (e.target as HTMLInputElement).value },
                             })}

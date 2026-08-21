@@ -253,10 +253,7 @@ export function App() {
   return (
     <div class="app-window">
       <div class="sidebar">
-        <div class="brand">
-          <span class="brand-mark"><IcoDown size={16} /></span>
-          <span class="brand-name">Dash Download</span>
-        </div>
+        {/* 窗口标题已经是产品名, 侧栏再放标+字会和 titlebar 重复 */}
         <div class="side-group">
           <div class="side-title">下载</div>
           {SIDE_STATES.map((s) => {
@@ -548,6 +545,8 @@ function DetailPane(props: { t: TaskInfo; collapsed: boolean; onToggle: () => vo
               {line("Bandwidth", t.state === "active" ? fmtSpeed(t.speed) : "0 Byte/sec")}
               {line("Remaining Time", t.state === "active" ? fmtEta(t) : "Unknown")}
               {line("Resumable", resumable)}
+              {line("Probe HTTP", t.http_status ? String(t.http_status) : "—")}
+              {line("Range ignored", t.range_ignored ? "Yes" : "No")}
               <div class="prog-bar"><div style={{ width: `${(p * 100).toFixed(2)}%` }}></div></div>
               <div class="seg-title" style={{ margin: 0 }}>
                 <span>Segments: {t.segments.length}</span>

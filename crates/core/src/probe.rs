@@ -1,4 +1,4 @@
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 use crate::types::RequestContext;
 use reqwest::header;
 
@@ -10,6 +10,9 @@ pub struct ProbeResult {
     /// 服务器是否接受 Range (决定能否分段与续传)
     pub resumable: bool,
     pub filename: String,
+    pub http_status: u16,
+    /// 带 Range 探测却拿到 200, 服务器忽略了 Range
+    pub range_ignored: bool,
 }
 
 /// 用带 `Range: bytes=0-` 的 GET 探测服务器能力.
@@ -24,7 +27,7 @@ pub async fn probe(
     for (k, v) in &ctx.headers {
         req = req.header(k.as_str(), v.as_str());
     }
-    let resp = req.send().await?.error_for_status()?;
+    let resp = req.send().await?;
 
     let status = resp.status();
     let headers = resp.headers().clone();
@@ -32,7 +35,12 @@ pub async fn probe(
     // 立即 drop resp 中断响应体传输, 探测只要头
     drop(resp);
 
+    if !status.is_success() {
+        return Err(CoreError::ProbeHttp(status.as_u16()));
+    }
+
     let resumable = status == reqwest::StatusCode::PARTIAL_CONTENT;
+    let range_ignored = status == reqwest::StatusCode::OK;
     // 206 时总大小以 Content-Range 的 "bytes 0-x/total" 为准,
     // Content-Length 只是本次响应的长度, 二者在 Range 请求下含义不同
     let size = if resumable {
@@ -52,7 +60,14 @@ pub async fn probe(
         .or_else(|| filename_from_url(&final_url))
         .unwrap_or_else(|| "download".to_string());
 
-    Ok(ProbeResult { final_url, size, resumable, filename: sanitize(&filename) })
+    Ok(ProbeResult {
+        final_url,
+        size,
+        resumable,
+        filename: sanitize(&filename),
+        http_status: status.as_u16(),
+        range_ignored,
+    })
 }
 
 /// Content-Disposition 里的 filename*= (RFC 5987) 优先于 filename=

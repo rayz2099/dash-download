@@ -16,6 +16,7 @@ tauri = { version = "2", features = ["tray-icon"] }
 axum = { version = "0.8", features = ["ws"] }
 tower-http = { version = "0.6", features = ["cors"] }
 dirs = "6"
+base64 = "0.22"
 tauri-plugin-updater = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"

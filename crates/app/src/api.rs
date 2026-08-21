@@ -3,13 +3,15 @@
 //! 强制预检; WS 校验 Origin. 对齐 NDM "app 在跑就能接管" 的交互.
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use dd_core::{AddTaskOptions, CoreError, Engine, EngineSettings, ProxyCfg, RequestContext};
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine as _;
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
@@ -66,6 +68,8 @@ pub async fn serve(ctx: Arc<ApiCtx>, port: u16) -> std::io::Result<()> {
         .route("/api/proxy-test", post(test_proxy))
         .route("/api/focus", post(focus_window))
         .route("/api/ext-origin", post(ext_origin))
+        // blob 导入走 JSON base64, 默认 2MB 不够盖住页面生成的图
+        .layer(DefaultBodyLimit::max(32 * 1024 * 1024))
         .layer(middleware::from_fn(check_client));
 
     let app = Router::new()
@@ -145,20 +149,32 @@ struct AddReq {
     queue_only: bool,
     #[serde(default)]
     headers: Vec<(String, String)>,
+    /// 页面 blob/data 已在扩展里读成字节, 引擎不再 HTTP 拉
+    #[serde(default)]
+    content_b64: Option<String>,
+    #[serde(default)]
+    mime: Option<String>,
 }
 
 async fn add_task(
     State(ctx): State<Arc<ApiCtx>>,
     Json(req): Json<AddReq>,
 ) -> Result<Response, ApiError> {
-    let opts = AddTaskOptions {
-        dir: req.dir,
-        name: req.name,
-        segments: req.segments,
-        queue_only: req.queue_only,
-        ctx: RequestContext { headers: req.headers },
+    let task = if let Some(b64) = req.content_b64 {
+        let bytes = STANDARD
+            .decode(b64.trim())
+            .map_err(|e| ApiError(dd_core::CoreError::Other(format!("content_b64 非法: {e}"))))?;
+        ctx.engine.import_bytes(&req.url, req.name, req.mime, &bytes)?
+    } else {
+        let opts = AddTaskOptions {
+            dir: req.dir,
+            name: req.name,
+            segments: req.segments,
+            queue_only: req.queue_only,
+            ctx: RequestContext { headers: req.headers },
+        };
+        ctx.engine.add(&req.url, opts)?
     };
-    let task = ctx.engine.add(&req.url, opts)?;
     show_main(&ctx);
     Ok(Json(task).into_response())
 }

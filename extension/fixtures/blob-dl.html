@@ -1,0 +1,35 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>blob takeover</title>
+<p>same-origin blob</p>
+<button id="same">download same-origin blob</button>
+<p>sandboxed iframe -> blob:null</p>
+<iframe id="frame" sandbox="allow-scripts" style="width:100%;height:120px"></iframe>
+<script>
+const png = new Uint8Array([137,80,78,71,13,10,26,10]);
+document.getElementById("same").onclick = () => {
+  const blob = new Blob([png], { type: "image/png" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "same-origin.png";
+  a.click();
+  URL.revokeObjectURL(url);
+};
+document.getElementById("frame").srcdoc = `
+  <button id="n">download blob:null</button>
+  <script>
+    const png = new Uint8Array([137,80,78,71,13,10,26,10]);
+    document.getElementById("n").onclick = () => {
+      const blob = new Blob([png], { type: "image/png" });
+      const url = URL.createObjectURL(blob);
+      console.log("created", url);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "opaque-null.png";
+      a.click();
+      URL.revokeObjectURL(url);
+    };
+  <\/script>
+`;
+</script>

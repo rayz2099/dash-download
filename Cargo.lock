@@ -804,6 +804,7 @@ name = "dd-app"
 version = "1.0.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "dd-core",
  "dirs 6.0.0",
  "serde",

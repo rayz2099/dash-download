@@ -1,10 +1,10 @@
 use crate::error::{CoreError, Result};
-use crate::probe::probe;
+use crate::probe::{probe, sanitize};
 use crate::runner::{plan_segments, replan_remaining, run_segment, run_stream, SegOutcome};
 use crate::settings::{EngineSettings, ProxyCfg, ProxyKind, ProxyProbe, MAX_CONN};
 use crate::store::Store;
 use crate::types::{
-    AddTaskOptions, EngineEvent, SegmentInfo, TaskInfo, TaskProgress, TaskState,
+    AddTaskOptions, EngineEvent, RequestContext, SegmentInfo, TaskInfo, TaskProgress, TaskState,
 };
 use crate::writer::TaskFile;
 use std::collections::HashMap;
@@ -170,6 +170,46 @@ impl Engine {
         if !opts.queue_only {
             self.inner.clone().schedule();
         }
+        Ok(info)
+    }
+
+    /// 扩展把页面 blob/data 读成字节后直写目标文件.
+    /// 不能走 add(): blob: 不是 http, 引擎也无法跨进程 fetch 页面 blob URL.
+    pub fn import_bytes(
+        &self,
+        url: &str,
+        name: Option<String>,
+        mime: Option<String>,
+        bytes: &[u8],
+    ) -> Result<TaskInfo> {
+        let live = self.inner.live.lock().unwrap().clone();
+        let dir = live.default_dir.clone();
+        std::fs::create_dir_all(&dir)?;
+        let name = import_name(name, mime.as_deref());
+        let dest = unique_path(Path::new(&dir), &name);
+        let final_name = dest
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or(name);
+        std::fs::write(&dest, bytes)?;
+        let size = bytes.len() as u64;
+        let id = {
+            let mut store = self.inner.store.lock().unwrap();
+            let id = store.insert_task(
+                url,
+                &dir,
+                &final_name,
+                TaskState::Completed,
+                &RequestContext::default(),
+                1,
+            )?;
+            store.update_probe(id, url, &final_name, Some(size), false)?;
+            store.checkpoint(id, size, &[])?;
+            store.set_state(id, TaskState::Completed, "")?;
+            id
+        };
+        let info = self.inner.task_info(id)?;
+        self.inner.emit(EngineEvent::TaskAdded { task: info.clone() });
         Ok(info)
     }
 
@@ -656,6 +696,31 @@ async fn sampler_loop(inner: Arc<Inner>) {
     }
 }
 
+fn import_name(name: Option<String>, mime: Option<&str>) -> String {
+    let raw = sanitize(&name.unwrap_or_default());
+    let ext = mime_ext(mime.unwrap_or(""));
+    if ext.is_empty() || raw.to_ascii_lowercase().ends_with(ext) {
+        return raw;
+    }
+    format!("{raw}{ext}")
+}
+
+fn mime_ext(mime: &str) -> &'static str {
+    let main = mime.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    match main.as_str() {
+        "image/png" => ".png",
+        "image/jpeg" | "image/jpg" => ".jpg",
+        "image/webp" => ".webp",
+        "image/gif" => ".gif",
+        "image/svg+xml" => ".svg",
+        "image/bmp" => ".bmp",
+        "application/pdf" => ".pdf",
+        "application/zip" => ".zip",
+        "text/plain" => ".txt",
+        _ => "",
+    }
+}
+
 /// 目标文件已存在时追加 " (n)" 序号, 不覆盖用户既有文件
 fn unique_path(dir: &Path, name: &str) -> PathBuf {
     let candidate = dir.join(name);
@@ -673,4 +738,68 @@ fn unique_path(dir: &Path, name: &str) -> PathBuf {
         }
     }
     dir.join(format!("{stem} ({}){ext}", std::process::id()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn tmp_engine() -> Engine {
+        let n = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let seq = std::sync::atomic::AtomicU64::new(0);
+        // 并行单测不能共享同一个 sqlite 文件, pid+ns 仍可能撞, 再加地址
+        let dir = std::env::temp_dir().join(format!(
+            "dd-import-{}-{}-{:p}",
+            std::process::id(),
+            n,
+            &seq as *const _
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        Engine::new(EngineConfig::new(dir.join("t.db"), dir.join("dl"))).unwrap()
+    }
+
+    #[tokio::test]
+    async fn import_bytes_writes_completed_file() {
+        let eng = tmp_engine();
+        let task = eng
+            .import_bytes(
+                "blob:https://gemini.google.com/abc",
+                Some("logo.png".into()),
+                Some("image/png".into()),
+                b"\x89PNG",
+            )
+            .unwrap();
+        assert_eq!(task.state, TaskState::Completed);
+        assert_eq!(task.size, Some(4));
+        assert_eq!(task.done, 4);
+        let path = Path::new(&task.dir).join(&task.name);
+        assert_eq!(std::fs::read(path).unwrap(), b"\x89PNG");
+        assert_eq!(task.name, "logo.png");
+    }
+
+    #[tokio::test]
+    async fn import_bytes_fills_ext_from_mime() {
+        let eng = tmp_engine();
+        let task = eng
+            .import_bytes(
+                "blob:https://example/x",
+                None,
+                Some("image/webp".into()),
+                b"RIFF",
+            )
+            .unwrap();
+        assert_eq!(task.name, "download.webp");
+        assert_eq!(task.state, TaskState::Completed);
+    }
+
+    #[tokio::test]
+    async fn should_not_add_blob_url() {
+        let eng = tmp_engine();
+        let err = eng.add("blob:https://x/y", AddTaskOptions::default()).unwrap_err();
+        assert!(err.to_string().contains("blob"));
+    }
 }

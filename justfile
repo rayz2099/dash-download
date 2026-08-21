@@ -62,4 +62,6 @@ windows-x86:
 # 更新检查/安装决策单测. GitHub Release 真包这条验收走这里, 不靠点 UI.
 test:
     cargo test -p dd-app
+    cargo test -p dd-core
     pnpm --dir ui test
+    node --test extension/policy.test.js

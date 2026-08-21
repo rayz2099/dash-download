@@ -1,32 +1,22 @@
-// Takeover: 先确保 app 在跑 (必要时 native host 拉起), 再 abort Chrome 下载.
+// Takeover: 先把任务交给 app, 成功后再 abort Chrome. blob:null 必须从页面读字节.
+importScripts("policy.js");
+
 const API = "http://127.0.0.1:41320";
 const NATIVE = "dev.ray.dash_download";
-const MIN_SIZE = 1024 * 1024;
-
 const DEFAULTS = { enabled: true };
+
 let cached = { ...DEFAULTS };
 const inflight = new Set();
+const sent = new Set();
+const pages = new Set();
 
 chrome.storage.local.get(DEFAULTS, (cfg) => {
   cached = { enabled: cfg.enabled };
-  applyDownloadUi();
 });
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;
   if (changes.enabled) cached.enabled = changes.enabled.newValue;
-  applyDownloadUi();
 });
-
-function applyDownloadUi() {
-  // 关掉原生下载气泡/shelf, 否则 cancel 也来不及挡住 (需要 downloads.ui)
-  const enabled = !cached.enabled;
-  const opts = { enabled };
-  if (chrome.downloads.setUiOptions) {
-    chrome.downloads.setUiOptions(opts).catch(() => {});
-  } else if (chrome.downloads.setShelfEnabled) {
-    chrome.downloads.setShelfEnabled(enabled);
-  }
-}
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -90,7 +80,7 @@ async function buildHeaders(url, referrer) {
     if (cookies.length) {
       headers.push(["Cookie", cookies.map((c) => `${c.name}=${c.value}`).join("; ")]);
     }
-  } catch (_) { /* 无权限时降级为裸请求 */ }
+  } catch (_) { /* blob/data 没有 cookie 域 */ }
   if (referrer) headers.push(["Referer", referrer]);
   headers.push(["User-Agent", navigator.userAgent]);
   return headers;
@@ -103,49 +93,167 @@ function basename(path) {
   return name || undefined;
 }
 
-function shouldTakeover(item) {
-  const url = item.finalUrl || item.url || "";
-  if (!/^https?:\/\//i.test(url)) return false;
-  if (item.fileSize > 0 && item.fileSize < MIN_SIZE) return false;
-  if ((item.mime || "").startsWith("text/html")) return false;
-  return true;
-}
-
 function abortChrome(id) {
   try { chrome.downloads.cancel(id); } catch (_) { /* 可能已取消 */ }
   try { chrome.downloads.erase({ id }); } catch (_) { /* ignore */ }
 }
 
+function notify(title, message) {
+  try {
+    chrome.notifications.create({
+      type: "basic",
+      iconUrl: "icons/128.png",
+      title,
+      message: String(message || ""),
+    });
+  } catch (_) { /* 无通知权限时只打日志 */ }
+}
+
 async function sendToApp(url, extra) {
-  const headers = await buildHeaders(url, extra && extra.referrer);
+  extra = extra || {};
+  const headers = extra.contentB64 ? [] : await buildHeaders(url, extra.referrer);
+  const body = { url, name: extra.filename, headers };
+  if (extra.contentB64) {
+    body.content_b64 = extra.contentB64;
+    body.mime = extra.mime || "";
+  }
   const task = await api("/api/tasks", {
     method: "POST",
-    body: JSON.stringify({
-      url,
-      name: extra && extra.filename,
-      headers,
-    }),
+    body: JSON.stringify(body),
   });
-  // 拉起主窗口, 失败不阻断接管
   api("/api/focus", { method: "POST" }).catch(() => {});
   return task;
 }
 
+function readBlob(url) {
+  return new Promise((resolve, reject) => {
+    if (pages.size === 0) {
+      reject(new Error("页面脚本未注入, 读不了 blob:null"));
+      return;
+    }
+    const req = String(Date.now()) + Math.random();
+    let left = pages.size;
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error("无法读取 " + url));
+    }, 4000);
+    for (const port of pages) {
+      const onMsg = (msg) => {
+        if (msg.op !== "read-blob-ok" || msg.req !== req) return;
+        port.onMessage.removeListener(onMsg);
+        if (settled) return;
+        if (msg.error || !msg.b64) {
+          left -= 1;
+          if (left <= 0) {
+            settled = true;
+            clearTimeout(timer);
+            reject(new Error(msg.error || "blob 读取失败"));
+          }
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        resolve({ mime: msg.mime || "", b64: msg.b64 });
+      };
+      port.onMessage.addListener(onMsg);
+      try {
+        port.postMessage({ op: "read-blob", url, req });
+      } catch (_) {
+        left -= 1;
+        port.onMessage.removeListener(onMsg);
+      }
+    }
+    if (left <= 0 && !settled) {
+      settled = true;
+      clearTimeout(timer);
+      reject(new Error("页面端口不可用"));
+    }
+  });
+}
+
+async function captureUrl(url, extra) {
+  extra = extra || {};
+  if (/^data:/i.test(url) && !extra.contentB64) {
+    const d = decodeDataUrl(url);
+    return sendToApp(url, { filename: extra.filename, contentB64: d.b64, mime: d.mime });
+  }
+  if (isBlobLike(url) && !extra.contentB64) {
+    const got = await readBlob(url);
+    return sendToApp(url, {
+      filename: extra.filename,
+      contentB64: got.b64,
+      mime: extra.mime || got.mime,
+    });
+  }
+  if (extra.contentB64) {
+    return sendToApp(url, extra);
+  }
+  extra.referrer = extra.referrer;
+  return sendToApp(url, extra);
+}
+
 function takeover(item) {
   const url = item.finalUrl || item.url;
+  const key = itemKey(url);
   if (!cached.enabled) return;
   if (!shouldTakeover(item)) return;
-  if (inflight.has(item.id) || inflight.has(url)) return;
-  inflight.add(item.id);
-  inflight.add(url);
-  setTimeout(() => { inflight.delete(item.id); inflight.delete(url); }, 12000);
-
-  ensureApp().then((ok) => {
-    if (!ok) return;
+  if (sent.has(key)) {
     abortChrome(item.id);
-    return sendToApp(url, { referrer: item.referrer, filename: basename(item.filename) });
-  }).catch((e) => console.warn("接管失败:", e));
+    return;
+  }
+  if (inflight.has(item.id) || inflight.has(key)) return;
+  inflight.add(item.id);
+  inflight.add(key);
+  setTimeout(() => { inflight.delete(item.id); inflight.delete(key); }, 12000);
+
+  ensureApp().then(async (ok) => {
+    if (!ok) return;
+    await captureUrl(url, {
+      referrer: item.referrer,
+      filename: basename(item.filename),
+    });
+    sent.add(key);
+    abortChrome(item.id);
+  }).catch((e) => {
+    console.warn("接管失败:", e);
+    notify("接管失败", e && e.message ? e.message : e);
+  });
 }
+
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== "dd-page") return;
+  pages.add(port);
+  port.onDisconnect.addListener(() => pages.delete(port));
+});
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || msg.op !== "captured") return;
+  sendResponse({ ok: true });
+  if (msg.error || !msg.b64) {
+    console.warn("页面捕获失败:", msg.error);
+    return;
+  }
+  if (!cached.enabled) return;
+  const key = itemKey(msg.url);
+  if (sent.has(key) || inflight.has(key)) return;
+  inflight.add(key);
+  setTimeout(() => inflight.delete(key), 12000);
+  ensureApp().then(async (ok) => {
+    if (!ok) throw new Error("无法拉起 Dash Download");
+    await captureUrl(msg.url, {
+      filename: msg.name,
+      contentB64: msg.b64,
+      mime: msg.mime,
+      referrer: msg.referrer || (sender.tab && sender.tab.url),
+    });
+    sent.add(key);
+  }).catch((e) => {
+    console.warn("接管失败:", e);
+    notify("接管失败", e && e.message ? e.message : e);
+  });
+});
 
 chrome.downloads.onCreated.addListener((item) => takeover(item));
 
@@ -167,13 +275,8 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (info.menuItemId !== "dd-download-link" || !info.linkUrl) return;
   try {
     if (!(await ensureApp())) throw new Error("无法拉起 Dash Download");
-    await sendToApp(info.linkUrl, { referrer: tab && tab.url });
+    await captureUrl(info.linkUrl, { referrer: tab && tab.url });
   } catch (e) {
-    chrome.notifications.create({
-      type: "basic",
-      iconUrl: "icons/128.png",
-      title: "发送失败",
-      message: String(e && e.message ? e.message : e),
-    });
+    notify("发送失败", e && e.message ? e.message : e);
   }
 });

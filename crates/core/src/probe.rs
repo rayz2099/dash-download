@@ -112,7 +112,7 @@ fn percent_decode(s: &str) -> Option<String> {
 }
 
 /// 去掉路径分隔符等危险字符, 防止服务器指定的文件名逃出下载目录
-fn sanitize(name: &str) -> String {
+pub(crate) fn sanitize(name: &str) -> String {
     let cleaned: String = name
         .chars()
         .map(|c| if matches!(c, '/' | '\\' | '\0' | ':') { '_' } else { c })

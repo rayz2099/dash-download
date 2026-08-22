@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="design_doc_mode" content="canvas">
+<title>Sidebar header</title>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<style>
+:root {
+  --sidebar-bg: #f4f4f5;
+  --content-bg: #ffffff;
+  --nav-active: #e8e8ea;
+  --row-hover: #ececee;
+  --border: #e4e4e7;
+  --text-1: #18181b;
+  --text-2: #71717a;
+  --text-3: #a1a1aa;
+  --accent: #2563eb;
+  --font-ui: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body, #root { height: 100%; }
+body { font-family: var(--font-ui); background: #f0eee9; }
+.win {
+  width: 420px; height: 340px;
+  border-radius: 10px; overflow: hidden;
+  background: var(--content-bg);
+  box-shadow: 0 0 0 1px rgba(0,0,0,.08), 0 18px 40px rgba(0,0,0,.12);
+  display: flex; flex-direction: column;
+}
+.titlebar {
+  height: 38px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: #ececee; border-bottom: 1px solid rgba(0,0,0,.06);
+  position: relative; color: var(--text-2); font-size: 12px; font-weight: 590;
+}
+.lights {
+  position: absolute; left: 12px; top: 0; bottom: 0;
+  display: flex; align-items: center; gap: 7px;
+}
+.lights i { width: 12px; height: 12px; border-radius: 50%; display: block; }
+.body { flex: 1; display: flex; min-height: 0; }
+.sidebar {
+  width: 200px; flex-shrink: 0; background: var(--sidebar-bg);
+  padding: 10px 10px 12px; display: flex; flex-direction: column;
+}
+.main {
+  flex: 1; padding: 18px 18px 0; min-width: 0;
+  border-left: 1px solid rgba(0,0,0,.04);
+}
+.page-title { font-size: 20px; font-weight: 620; letter-spacing: -0.03em; }
+.page-sub { font-size: 12px; color: var(--text-2); margin-top: 4px; }
+.brand {
+  display: flex; align-items: center; gap: 8px;
+  padding: 2px 8px 14px;
+}
+.brand-mark {
+  width: 26px; height: 26px; border-radius: 7px;
+  background: var(--accent); color: #fff;
+  display: flex; align-items: center; justify-content: center;
+}
+.brand-name { font-size: 13px; font-weight: 600; letter-spacing: -0.02em; }
+.brand-bunny {
+  width: 26px; height: 26px; border-radius: 7px; object-fit: cover;
+}
+.side-title {
+  font-size: 10.5px; font-weight: 600; color: var(--text-3);
+  padding: 0 8px 7px; letter-spacing: 0.04em; text-transform: uppercase;
+}
+.side-item {
+  display: flex; align-items: center; gap: 8px;
+  height: 32px; padding: 0 8px; border-radius: 7px;
+  font-size: 12.5px; color: var(--text-1);
+}
+.side-item.on { background: var(--nav-active); font-weight: 500; }
+.side-ico { color: var(--text-2); width: 16px; display: flex; }
+.side-count { margin-left: auto; font-size: 11px; color: var(--text-3); }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="design-canvas.jsx" type="text/babel"></script>
+<script src="sidebar-header.jsx" type="text/babel"></script>
+</body>
+</html>

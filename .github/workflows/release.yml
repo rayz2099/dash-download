@@ -129,11 +129,14 @@ jobs:
               if (!file || !sig) return null;
               return [key, { url: file.browser_download_url, signature: await readSig(sig) }];
             };
+            // Tauri 2 默认签 NSIS exe, 不再出 nsis.zip; zip 只留给 v1Compatible.
+            const win = await pair("windows-x86_64", /x64-setup\.exe$/, /x64-setup\.exe\.sig$/)
+              ?? await pair("windows-x86_64", /\.nsis\.zip$/, /\.nsis\.zip\.sig$/);
             const entries = (await Promise.all([
               pair("darwin-aarch64", /\.app\.tar\.gz$/, /\.app\.tar\.gz\.sig$/),
               pair("linux-x86_64", /\.AppImage$/, /\.AppImage\.sig$/),
-              pair("windows-x86_64", /\.nsis\.zip$/, /\.nsis\.zip\.sig$/),
             ])).filter(Boolean);
+            if (win) entries.push(win);
             const platforms = Object.fromEntries(entries);
             const missing = ["darwin-aarch64", "linux-x86_64", "windows-x86_64"]
               .filter((k) => !platforms[k]);

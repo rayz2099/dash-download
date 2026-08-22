@@ -29,7 +29,7 @@ tag (`v*`) 会走 `.github/workflows/release.yml`: 分平台打 app 包 + Chrome
 
 ## v1.0 — 浏览器闭环
 
-- Native Messaging 最小 host: 扩展可拉起未运行的 app (ADR 0003 后置项)
+- Native Messaging 最小 host + 开机自启: 扩展可拉起未运行的 app (ADR 0003 拉起面)
 - Takeover 过滤规则可配 (域名黑名单, 体积阈值)
 - 失败可诊断: 保留探测响应码 / Range 是否被忽略
 

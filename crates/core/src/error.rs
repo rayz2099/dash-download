@@ -8,6 +8,9 @@ pub enum CoreError {
     Db(#[from] rusqlite::Error),
     #[error("任务不存在: {0}")]
     NotFound(i64),
+    /// 探测拿到 4xx/5xx, 状态码要落库才能在失败详情里回看
+    #[error("探测 HTTP {0}")]
+    ProbeHttp(u16),
     #[error("{0}")]
     Other(String),
 }

@@ -82,6 +82,12 @@ pub struct TaskInfo {
     /// None = 服务器未给 Content-Length
     pub size: Option<u64>,
     pub resumable: bool,
+    /// 最近一次探测的 HTTP 状态码, 0 表示还没探测
+    #[serde(default)]
+    pub http_status: u16,
+    /// 发了 Range 却拿到 200: 服务器忽略 Range
+    #[serde(default)]
+    pub range_ignored: bool,
     pub state: TaskState,
     pub done: u64,
     /// 瞬时速度 bytes/s, 仅内存值不落库

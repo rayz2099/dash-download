@@ -51,7 +51,7 @@ jobs:
             args: --target aarch64-apple-darwin --bundles app,dmg
           - host: ubuntu-22.04
             rust_target: x86_64-unknown-linux-gnu
-            args: --target x86_64-unknown-linux-gnu --bundles deb
+            args: --target x86_64-unknown-linux-gnu --bundles deb,appimage
           - host: windows-latest
             rust_target: x86_64-pc-windows-msvc
             args: --target x86_64-pc-windows-msvc --bundles nsis
@@ -88,12 +88,86 @@ jobs:
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: crates/app
           tagName: ${{ github.ref_name }}
           releaseName: Dash Download ${{ github.ref_name }}
           releaseId: ${{ needs.prepare.outputs.release_id }}
+          includeUpdaterJson: false
           args: ${{ matrix.args }}
+
+
+  # matrix 各自上传 latest.json 会互盖且可能漏传; 全部平台结束后按 .sig 重写一份.
+  updater-manifest:
+    needs: [prepare, app]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const releaseId = Number("${{ needs.prepare.outputs.release_id }}");
+            const tag = context.ref.replace("refs/tags/", "");
+            const release = (await github.rest.repos.getRelease({
+              owner, repo, release_id: releaseId,
+            })).data;
+            const assets = release.assets;
+            const find = (re) => assets.find((a) => re.test(a.name));
+            const readSig = async (asset) => {
+              const res = await github.request(`GET /repos/${owner}/${repo}/releases/assets/${asset.id}`, {
+                headers: { Accept: "application/octet-stream" },
+              });
+              if (typeof res.data === "string") return res.data.trim();
+              return Buffer.from(res.data).toString("utf8").trim();
+            };
+            const pair = async (key, fileRe, sigRe) => {
+              const file = find(fileRe);
+              const sig = find(sigRe);
+              if (!file || !sig) return null;
+              return [key, { url: file.browser_download_url, signature: await readSig(sig) }];
+            };
+            const entries = (await Promise.all([
+              pair("darwin-aarch64", /\.app\.tar\.gz$/, /\.app\.tar\.gz\.sig$/),
+              pair("linux-x86_64", /\.AppImage$/, /\.AppImage\.sig$/),
+              pair("windows-x86_64", /\.nsis\.zip$/, /\.nsis\.zip\.sig$/),
+            ])).filter(Boolean);
+            const platforms = Object.fromEntries(entries);
+            const missing = ["darwin-aarch64", "linux-x86_64", "windows-x86_64"]
+              .filter((k) => !platforms[k]);
+            if (missing.length) {
+              const leftover = assets.find((a) => a.name === "latest.json");
+              if (leftover) {
+                await github.rest.repos.deleteReleaseAsset({
+                  owner, repo, asset_id: leftover.id,
+                });
+              }
+              throw new Error("latest.json 缺平台, 已删除残缺清单: " + missing.join(","));
+            }
+            const version = tag.replace(/^v/, "");
+            const body = {
+              version,
+              notes: tag,
+              pub_date: new Date().toISOString(),
+              platforms,
+            };
+            const old = assets.find((a) => a.name === "latest.json");
+            if (old) {
+              await github.rest.repos.deleteReleaseAsset({
+                owner, repo, asset_id: old.id,
+              });
+            }
+            await github.rest.repos.uploadReleaseAsset({
+              owner,
+              repo,
+              release_id: releaseId,
+              name: "latest.json",
+              data: JSON.stringify(body, null, 2),
+              headers: { "content-type": "application/json" },
+            });
+            core.info("uploaded latest.json platforms=" + Object.keys(body.platforms).join(","));
 
   extension:
     needs: prepare
@@ -114,7 +188,7 @@ jobs:
           files: dash-download-chrome-${{ github.ref_name }}.zip
 
   prune:
-    needs: [app, extension]
+    needs: [app, extension, updater-manifest]
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/github-script@v7

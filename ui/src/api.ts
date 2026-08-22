@@ -1,5 +1,6 @@
 // localhost API 客户端: UI 与扩展共用同一套 REST/WS (ADR 0003)
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 
 export type TaskState =
   | "queued" | "probing" | "active" | "paused" | "completed" | "failed" | "canceled";
@@ -19,6 +20,8 @@ export interface TaskInfo {
   dir: string;
   size: number | null;
   resumable: boolean;
+  http_status: number;
+  range_ignored: boolean;
   state: TaskState;
   done: number;
   speed: number;
@@ -127,3 +130,67 @@ export function connectEvents(onEvent: (ev: EngineEvent) => void): () => void {
     ws?.close();
   };
 }
+
+export type UpdatePhase =
+  | "idle" | "checking" | "up_to_date" | "available"
+  | "downloading" | "waiting" | "installing" | "error";
+
+export interface UpdateStatus {
+  auto_update: boolean;
+  current: string;
+  latest: string | null;
+  phase: UpdatePhase;
+  done: number;
+  total: number | null;
+  error: string | null;
+}
+
+export const updateStatus = () => invoke<UpdateStatus>("update_status");
+export const checkUpdate = () => invoke<UpdateStatus>("check_update");
+export const checkNow = () => invoke<UpdateStatus>("check_now");
+export const setAutoUpdate = (enabled: boolean) =>
+  invoke<UpdateStatus>("set_auto_update", { enabled });
+export const autoStartOn = () => invoke<boolean>("auto_start_on");
+export const setAutoStart = (enabled: boolean) =>
+  invoke<boolean>("set_auto_start", { enabled });
+
+export type ProxyKind = "direct" | "no_proxy" | "http" | "socks5";
+
+export interface ProxyCfg {
+  kind: ProxyKind;
+  host: string;
+  port: number;
+  auth: boolean;
+  user: string;
+  pass: string;
+  pass_set?: boolean;
+}
+
+export interface EngineSettings {
+  default_dir: string;
+  max_concurrent: number;
+  max_segments: number;
+  proxy: ProxyCfg;
+}
+
+export const MAX_CONN = 128;
+
+export const getSettings = () => req<EngineSettings>("GET", "/api/settings");
+export const putSettings = (s: EngineSettings) =>
+  req<EngineSettings>("PUT", "/api/settings", s);
+
+/// 系统目录面板. 取消返回 null, 不要把空路径写进 prefs.
+export async function pickDir(current: string): Promise<string | null> {
+  const sel = await open({ directory: true, multiple: false, defaultPath: current });
+  if (typeof sel === "string" && sel.length > 0) return sel;
+  return null;
+}
+
+export interface ProxyProbe {
+  status: number;
+  ms: number;
+  final_url: string;
+}
+
+export const testProxy = (url: string, proxy: ProxyCfg) =>
+  req<ProxyProbe>("POST", "/api/proxy-test", { url, proxy });

@@ -1,9 +1,10 @@
 use crate::error::{CoreError, Result};
-use crate::probe::probe;
+use crate::probe::{probe, sanitize};
 use crate::runner::{plan_segments, replan_remaining, run_segment, run_stream, SegOutcome};
+use crate::settings::{EngineSettings, ProxyCfg, ProxyKind, ProxyProbe, MAX_CONN, MAX_IMPORT_BYTES};
 use crate::store::Store;
 use crate::types::{
-    AddTaskOptions, EngineEvent, SegmentInfo, TaskInfo, TaskProgress, TaskState,
+    AddTaskOptions, EngineEvent, RequestContext, SegmentInfo, TaskInfo, TaskProgress, TaskState,
 };
 use crate::writer::TaskFile;
 use std::collections::HashMap;
@@ -27,6 +28,7 @@ pub struct EngineConfig {
     /// Segment 无进度重试上限
     pub retry_limit: u32,
     pub user_agent: String,
+    pub proxy: ProxyCfg,
 }
 
 impl EngineConfig {
@@ -39,8 +41,47 @@ impl EngineConfig {
             min_segment_size: 1024 * 1024,
             retry_limit: 5,
             user_agent: format!("dash-download/{}", env!("CARGO_PKG_VERSION")),
+            proxy: ProxyCfg::default(),
         }
     }
+
+    fn to_settings(&self) -> EngineSettings {
+        EngineSettings {
+            default_dir: self.default_dir.to_string_lossy().into_owned(),
+            max_concurrent: self.max_concurrent as u32,
+            max_segments: self.max_segments,
+            proxy: self.proxy.clone(),
+        }
+    }
+}
+
+/// 代理变更必须换 Client: reqwest 把 Proxy 编进连接池, 改字段不会影响已建池.
+fn build_client(ua: &str, proxy: &ProxyCfg) -> Result<reqwest::Client> {
+    proxy.validate()?;
+    let mut b = reqwest::Client::builder()
+        .user_agent(ua)
+        .connect_timeout(Duration::from_secs(15))
+        .cookie_store(true);
+    match proxy.kind {
+        ProxyKind::Direct => {
+            b = b.no_proxy();
+        }
+        ProxyKind::NoProxy => {}
+        ProxyKind::Http | ProxyKind::Socks5 => {
+            let scheme = match proxy.kind {
+                ProxyKind::Http => "http",
+                ProxyKind::Socks5 => "socks5h",
+                ProxyKind::Direct | ProxyKind::NoProxy => unreachable!(),
+            };
+            let url = format!("{}://{}:{}", scheme, proxy.host.trim(), proxy.port);
+            let mut p = reqwest::Proxy::all(&url)?;
+            if proxy.auth {
+                p = p.basic_auth(&proxy.user, &proxy.pass);
+            }
+            b = b.proxy(p);
+        }
+    }
+    Ok(b.build()?)
 }
 
 /// 运行中任务的内存句柄: 段进度用原子量共享给采样器, 避免任何进度锁
@@ -54,7 +95,8 @@ struct Running {
 
 struct Inner {
     cfg: EngineConfig,
-    client: reqwest::Client,
+    live: Mutex<EngineSettings>,
+    client: Mutex<reqwest::Client>,
     store: Mutex<Store>,
     running: Mutex<HashMap<i64, Running>>,
     speeds: Mutex<HashMap<i64, u64>>,
@@ -72,15 +114,14 @@ impl Engine {
     pub fn new(cfg: EngineConfig) -> Result<Engine> {
         let store = Store::open(&cfg.db_path)?;
         store.recover_interrupted()?;
-        let client = reqwest::Client::builder()
-            .user_agent(cfg.user_agent.clone())
-            .connect_timeout(Duration::from_secs(15))
-            .cookie_store(true)
-            .build()?;
+        let live = cfg.to_settings();
+        live.validate()?;
+        let client = build_client(&cfg.user_agent, &live.proxy)?;
         let (events, _) = broadcast::channel(512);
         let inner = Arc::new(Inner {
             cfg,
-            client,
+            live: Mutex::new(live),
+            client: Mutex::new(client),
             store: Mutex::new(store),
             running: Mutex::new(HashMap::new()),
             speeds: Mutex::new(HashMap::new()),
@@ -112,12 +153,10 @@ impl Engine {
         if !matches!(parsed.scheme(), "http" | "https") {
             return Err(CoreError::Other(format!("暂不支持 {} 协议", parsed.scheme())));
         }
-        let dir = opts
-            .dir
-            .clone()
-            .unwrap_or_else(|| self.inner.cfg.default_dir.to_string_lossy().into_owned());
+        let live = self.inner.live.lock().unwrap().clone();
+        let dir = opts.dir.clone().unwrap_or_else(|| live.default_dir.clone());
         let name = opts.name.clone().unwrap_or_default();
-        let max_segments = opts.segments.unwrap_or(self.inner.cfg.max_segments).clamp(1, 16);
+        let max_segments = opts.segments.unwrap_or(live.max_segments).clamp(1, MAX_CONN);
         let id = self.inner.store.lock().unwrap().insert_task(
             url,
             &dir,
@@ -131,6 +170,52 @@ impl Engine {
         if !opts.queue_only {
             self.inner.clone().schedule();
         }
+        Ok(info)
+    }
+
+    /// 扩展把页面 blob/data 读成字节后直写目标文件.
+    /// 不能走 add(): blob: 不是 http, 引擎也无法跨进程 fetch 页面 blob URL.
+    pub fn import_bytes(
+        &self,
+        url: &str,
+        name: Option<String>,
+        mime: Option<String>,
+        bytes: &[u8],
+    ) -> Result<TaskInfo> {
+        if bytes.len() > MAX_IMPORT_BYTES {
+            return Err(CoreError::Other(format!(
+                "导入内容过大: {} > {MAX_IMPORT_BYTES} 字节",
+                bytes.len()
+            )));
+        }
+        let live = self.inner.live.lock().unwrap().clone();
+        let dir = live.default_dir.clone();
+        std::fs::create_dir_all(&dir)?;
+        let name = import_name(name, mime.as_deref());
+        let dest = unique_path(Path::new(&dir), &name);
+        let final_name = dest
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or(name);
+        std::fs::write(&dest, bytes)?;
+        let size = bytes.len() as u64;
+        let id = {
+            let mut store = self.inner.store.lock().unwrap();
+            let id = store.insert_task(
+                url,
+                &dir,
+                &final_name,
+                TaskState::Completed,
+                &RequestContext::default(),
+                1,
+            )?;
+            store.update_probe(id, url, &final_name, Some(size), false, 0, false)?;
+            store.checkpoint(id, size, &[])?;
+            store.set_state(id, TaskState::Completed, "")?;
+            id
+        };
+        let info = self.inner.task_info(id)?;
+        self.inner.emit(EngineEvent::TaskAdded { task: info.clone() });
         Ok(info)
     }
 
@@ -191,7 +276,7 @@ impl Engine {
 
     /// 调整并行度. 下载中只记偏好, 暂停/未开始时立刻按剩余字节重切分段.
     pub fn set_connections(&self, id: i64, n: u32) -> Result<()> {
-        let n = n.clamp(1, 16);
+        let n = n.clamp(1, MAX_CONN);
         let info = self.inner.task_info(id)?;
         self.inner.store.lock().unwrap().set_max_segments(id, n)?;
         if matches!(info.state, TaskState::Paused | TaskState::Queued | TaskState::Failed | TaskState::Canceled)
@@ -209,6 +294,51 @@ impl Engine {
             self.inner.emit(EngineEvent::TaskUpdated { task: t });
         }
         Ok(())
+    }
+
+    /// 当前运行时偏好. UI 设置页的读模型.
+    pub fn settings(&self) -> EngineSettings {
+        self.inner.live.lock().unwrap().clone()
+    }
+
+    /// 用草稿代理发一次 GET. 不写 prefs, 避免「还没点应用就把坏代理生效」.
+    pub async fn probe_url(&self, proxy: &ProxyCfg, url: &str) -> Result<ProxyProbe> {
+        let url = url.trim();
+        if url.is_empty() {
+            return Err(CoreError::Other("URL 不能为空".into()));
+        }
+        let parsed = url::Url::parse(url).map_err(|e| CoreError::Other(format!("URL 非法: {e}")))?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err(CoreError::Other(format!("暂不支持 {} 协议", parsed.scheme())));
+        }
+        let client = build_client(&self.inner.cfg.user_agent, proxy)?;
+        let t0 = Instant::now();
+        // 设置页探测要快失败, 跟下载 Client 的 15s connect 分开.
+        let send = client.get(url).send();
+        let resp = match tokio::time::timeout(Duration::from_secs(5), send).await {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_) => return Err(CoreError::Other("超时 5s".into())),
+        };
+        Ok(ProxyProbe {
+            status: resp.status().as_u16(),
+            ms: t0.elapsed().as_millis() as u64,
+            final_url: resp.url().to_string(),
+        })
+    }
+
+    /// 热更新并发 / 目录 / 代理. 已在跑的 Task 仍持有旧 Client, 暂停再续才走新代理.
+    /// 不在这里 schedule: 调用方必须先落盘, 否则写盘失败无法收回已启动的任务.
+    pub fn apply_settings(&self, next: EngineSettings) -> Result<EngineSettings> {
+        next.validate()?;
+        let client = build_client(&self.inner.cfg.user_agent, &next.proxy)?;
+        *self.inner.client.lock().unwrap() = client;
+        *self.inner.live.lock().unwrap() = next.clone();
+        Ok(next)
+    }
+
+    pub fn pump_queue(&self) {
+        self.inner.clone().schedule();
     }
 
     /// 用原链接重新下载 (NDM 的 Redownload): 清进度重新排队.
@@ -323,7 +453,8 @@ impl Inner {
         loop {
             let slots = {
                 let running = self.running.lock().unwrap();
-                self.cfg.max_concurrent.saturating_sub(running.len())
+                let max = self.live.lock().unwrap().max_concurrent as usize;
+                max.saturating_sub(running.len())
             };
             if slots == 0 {
                 return;
@@ -355,6 +486,10 @@ impl Inner {
         self.running.lock().unwrap().remove(&id);
         self.speeds.lock().unwrap().remove(&id);
         if let Err(e) = outcome {
+            // 只把探测失败的状态码写入诊断字段. 分段/单流 HTTP 错误不能盖掉探测结果.
+            if let CoreError::ProbeHttp(st) = &e {
+                let _ = self.store.lock().unwrap().save_http(id, *st, false);
+            }
             let _ = self.set_state_emit(id, TaskState::Failed, &e.to_string());
         }
         self.clone().schedule();
@@ -370,7 +505,8 @@ impl Inner {
 
         // 首跑探测; 续传 (已有分段) 跳过, 复用上次的 final_url 与分段布局
         let info = if info.segments.is_empty() {
-            let p = probe(&self.client, &info.url, &ctx).await?;
+            let http = self.client.lock().unwrap().clone();
+            let p = probe(&http, &info.url, &ctx).await?;
             let name = if info.name.is_empty() { p.filename.clone() } else { info.name.clone() };
             let segs = match (p.size, p.resumable) {
                 (Some(size), true) if size > 0 => {
@@ -381,7 +517,15 @@ impl Inner {
             };
             {
                 let store = self.store.lock().unwrap();
-                store.update_probe(id, &p.final_url, &name, p.size, p.resumable)?;
+                store.update_probe(
+                    id,
+                    &p.final_url,
+                    &name,
+                    p.size,
+                    p.resumable,
+                    p.http_status,
+                    p.range_ignored,
+                )?;
                 store.replace_segments(id, &segs)?;
             }
             self.store.lock().unwrap().get_task(id)?.ok_or(CoreError::NotFound(id))?
@@ -419,7 +563,7 @@ impl Inner {
             || (info.resumable && info.segments.first().map(|s| s.end > 0).unwrap_or(false));
         let mut set: JoinSet<Result<SegOutcome>> = JoinSet::new();
         for (seg, (_, done)) in info.segments.iter().zip(seg_handles.iter()) {
-            let client = self.client.clone();
+            let client = self.client.lock().unwrap().clone();
             let url = info.final_url.clone();
             let ctx = ctx.clone();
             let file = file.clone();
@@ -574,6 +718,31 @@ async fn sampler_loop(inner: Arc<Inner>) {
     }
 }
 
+fn import_name(name: Option<String>, mime: Option<&str>) -> String {
+    let raw = sanitize(&name.unwrap_or_default());
+    let ext = mime_ext(mime.unwrap_or(""));
+    if ext.is_empty() || raw.to_ascii_lowercase().ends_with(ext) {
+        return raw;
+    }
+    format!("{raw}{ext}")
+}
+
+fn mime_ext(mime: &str) -> &'static str {
+    let main = mime.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    match main.as_str() {
+        "image/png" => ".png",
+        "image/jpeg" | "image/jpg" => ".jpg",
+        "image/webp" => ".webp",
+        "image/gif" => ".gif",
+        "image/svg+xml" => ".svg",
+        "image/bmp" => ".bmp",
+        "application/pdf" => ".pdf",
+        "application/zip" => ".zip",
+        "text/plain" => ".txt",
+        _ => "",
+    }
+}
+
 /// 目标文件已存在时追加 " (n)" 序号, 不覆盖用户既有文件
 fn unique_path(dir: &Path, name: &str) -> PathBuf {
     let candidate = dir.join(name);
@@ -591,4 +760,78 @@ fn unique_path(dir: &Path, name: &str) -> PathBuf {
         }
     }
     dir.join(format!("{stem} ({}){ext}", std::process::id()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn tmp_engine() -> Engine {
+        let n = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let seq = std::sync::atomic::AtomicU64::new(0);
+        // 并行单测不能共享同一个 sqlite 文件, pid+ns 仍可能撞, 再加地址
+        let dir = std::env::temp_dir().join(format!(
+            "dd-import-{}-{}-{:p}",
+            std::process::id(),
+            n,
+            &seq as *const _
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        Engine::new(EngineConfig::new(dir.join("t.db"), dir.join("dl"))).unwrap()
+    }
+
+    #[tokio::test]
+    async fn import_bytes_writes_completed_file() {
+        let eng = tmp_engine();
+        let task = eng
+            .import_bytes(
+                "blob:https://gemini.google.com/abc",
+                Some("logo.png".into()),
+                Some("image/png".into()),
+                b"\x89PNG",
+            )
+            .unwrap();
+        assert_eq!(task.state, TaskState::Completed);
+        assert_eq!(task.size, Some(4));
+        assert_eq!(task.done, 4);
+        let path = Path::new(&task.dir).join(&task.name);
+        assert_eq!(std::fs::read(path).unwrap(), b"\x89PNG");
+        assert_eq!(task.name, "logo.png");
+    }
+
+    #[tokio::test]
+    async fn import_bytes_fills_ext_from_mime() {
+        let eng = tmp_engine();
+        let task = eng
+            .import_bytes(
+                "blob:https://example/x",
+                None,
+                Some("image/webp".into()),
+                b"RIFF",
+            )
+            .unwrap();
+        assert_eq!(task.name, "download.webp");
+        assert_eq!(task.state, TaskState::Completed);
+    }
+
+    #[tokio::test]
+    async fn import_bytes_rejects_over_max() {
+        let eng = tmp_engine();
+        let bytes = vec![0u8; MAX_IMPORT_BYTES + 1];
+        let err = eng
+            .import_bytes("blob:https://example/x", None, None, &bytes)
+            .unwrap_err();
+        assert!(err.to_string().contains("过大"));
+    }
+
+    #[tokio::test]
+    async fn should_not_add_blob_url() {
+        let eng = tmp_engine();
+        let err = eng.add("blob:https://x/y", AddTaskOptions::default()).unwrap_err();
+        assert!(err.to_string().contains("blob"));
+    }
 }

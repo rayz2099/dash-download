@@ -5,6 +5,7 @@ mod engine;
 mod error;
 mod probe;
 mod runner;
+mod settings;
 mod store;
 mod types;
 mod writer;
@@ -12,6 +13,7 @@ mod writer;
 pub use engine::{Engine, EngineConfig};
 pub use error::{CoreError, Result};
 pub use probe::ProbeResult;
+pub use settings::{EngineSettings, ProxyCfg, ProxyKind, ProxyProbe, MAX_CONN, MAX_IMPORT_BYTES};
 pub use types::{
     AddTaskOptions, EngineEvent, RequestContext, SegmentInfo, TaskInfo, TaskProgress, TaskState,
 };

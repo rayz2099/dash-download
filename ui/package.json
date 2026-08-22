@@ -5,15 +5,18 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build"
+    "build": "vite build",
+    "test": "vitest run"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "^2.7.2",
     "preact": "^10"
   },
   "devDependencies": {
     "@preact/preset-vite": "^2",
     "typescript": "^5",
-    "vite": "^7"
+    "vite": "^7",
+    "vitest": "^4.1.11"
   }
 }

@@ -3,15 +3,17 @@
 //! 强制预检; WS 校验 Origin. 对齐 NDM "app 在跑就能接管" 的交互.
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use dd_core::{AddTaskOptions, Engine, RequestContext};
+use dd_core::{AddTaskOptions, CoreError, Engine, EngineSettings, ProxyCfg, RequestContext};
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine as _;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tauri::Manager;
@@ -20,6 +22,8 @@ pub struct ApiCtx {
     pub engine: Engine,
     /// setup 之后填入, 扩展接管时用来把主窗口拉到前台
     pub app: Arc<Mutex<Option<tauri::AppHandle>>>,
+    pub cfg_dir: std::path::PathBuf,
+    pub prefs: crate::prefs::Store,
 }
 
 struct ApiError(dd_core::CoreError);
@@ -44,7 +48,7 @@ impl From<dd_core::CoreError> for ApiError {
 pub async fn serve(ctx: Arc<ApiCtx>, port: u16) -> std::io::Result<()> {
     let cors = CorsLayer::new()
         .allow_origin(AllowOrigin::predicate(|origin, _req| origin_ok(origin)))
-        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS])
         .allow_headers([
             header::CONTENT_TYPE,
             HeaderName::from_static("x-dd-client"),
@@ -60,7 +64,12 @@ pub async fn serve(ctx: Arc<ApiCtx>, port: u16) -> std::io::Result<()> {
         .route("/api/tasks/{id}", delete(remove_task))
         .route("/api/pause-all", post(pause_all))
         .route("/api/resume-all", post(resume_all))
+        .route("/api/settings", get(get_settings).put(put_settings))
+        .route("/api/proxy-test", post(test_proxy))
         .route("/api/focus", post(focus_window))
+        .route("/api/ext-origin", post(ext_origin))
+        // blob 导入走 JSON base64, 默认 2MB 不够盖住页面生成的图
+        .layer(DefaultBodyLimit::max(32 * 1024 * 1024))
         .layer(middleware::from_fn(check_client));
 
     let app = Router::new()
@@ -76,13 +85,13 @@ pub async fn serve(ctx: Arc<ApiCtx>, port: u16) -> std::io::Result<()> {
     axum::serve(listener, app).await
 }
 
-/// 允许的浏览器 Origin: 本机 webview / vite / 任意 chrome 扩展.
-/// 恶意网页带自己的 Origin, 不在白名单, CORS 预检失败且中间件直接拒.
+/// 允许的浏览器 Origin: 本机 webview / vite / 本扩展 (manifest.key 算出的稳定 ID).
+/// 其它 chrome-extension:// 一律拒绝, 避免任意扩展读代理密码或写任务.
 fn origin_ok(origin: &HeaderValue) -> bool {
     let Ok(s) = origin.to_str() else {
         return false;
     };
-    s.starts_with("chrome-extension://")
+    crate::launch::is_our_ext_origin(s)
         || s == "http://localhost:5173"
         || s == "http://127.0.0.1:5173"
         || s == "https://tauri.localhost"
@@ -140,20 +149,32 @@ struct AddReq {
     queue_only: bool,
     #[serde(default)]
     headers: Vec<(String, String)>,
+    /// 页面 blob/data 已在扩展里读成字节, 引擎不再 HTTP 拉
+    #[serde(default)]
+    content_b64: Option<String>,
+    #[serde(default)]
+    mime: Option<String>,
 }
 
 async fn add_task(
     State(ctx): State<Arc<ApiCtx>>,
     Json(req): Json<AddReq>,
 ) -> Result<Response, ApiError> {
-    let opts = AddTaskOptions {
-        dir: req.dir,
-        name: req.name,
-        segments: req.segments,
-        queue_only: req.queue_only,
-        ctx: RequestContext { headers: req.headers },
+    let task = if let Some(b64) = req.content_b64 {
+        let bytes = STANDARD
+            .decode(b64.trim())
+            .map_err(|e| ApiError(dd_core::CoreError::Other(format!("content_b64 非法: {e}"))))?;
+        ctx.engine.import_bytes(&req.url, req.name, req.mime, &bytes)?
+    } else {
+        let opts = AddTaskOptions {
+            dir: req.dir,
+            name: req.name,
+            segments: req.segments,
+            queue_only: req.queue_only,
+            ctx: RequestContext { headers: req.headers },
+        };
+        ctx.engine.add(&req.url, opts)?
     };
-    let task = ctx.engine.add(&req.url, opts)?;
     show_main(&ctx);
     Ok(Json(task).into_response())
 }
@@ -235,6 +256,62 @@ async fn remove_task(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+
+async fn get_settings(State(ctx): State<Arc<ApiCtx>>) -> Json<Value> {
+    settings_json(ctx.engine.settings())
+}
+
+/// GET 不回传明文密码, 只带 pass_set 让设置页知道已保存过.
+fn settings_json(s: EngineSettings) -> Json<Value> {
+    let pass_set = !s.proxy.pass.is_empty();
+    let mut s = s;
+    s.proxy.pass.clear();
+    let mut v = serde_json::to_value(&s).expect("settings 可序列化");
+    v["proxy"]["pass_set"] = json!(pass_set);
+    Json(v)
+}
+
+/// 写 prefs.json 与热更新引擎必须同一次成功.
+/// 先改内存再落盘; 落盘失败要把引擎滚回去, 否则 API 报错但下载已走新代理.
+async fn put_settings(
+    State(ctx): State<Arc<ApiCtx>>,
+    Json(mut req): Json<EngineSettings>,
+) -> Result<Response, ApiError> {
+    let prev = ctx.engine.settings();
+    // 空密码表示沿用已存值, 避免设置页改目录时把代理密码写成空
+    if req.proxy.pass.is_empty() {
+        req.proxy.pass = prev.proxy.pass.clone();
+    }
+    let applied = ctx.engine.apply_settings(req)?;
+    if let Err(e) = ctx.prefs.patch(|p| p.apply_engine(&applied)) {
+        ctx.engine
+            .apply_settings(prev)
+            .map_err(|rb| ApiError(CoreError::Other(format!("写盘失败 ({e}) 且回滚失败: {rb}"))))?;
+        return Err(ApiError(CoreError::Other(e)));
+    }
+    ctx.engine.pump_queue();
+    Ok(settings_json(applied).into_response())
+}
+
+
+#[derive(Deserialize)]
+struct ProxyTestReq {
+    url: String,
+    proxy: ProxyCfg,
+}
+
+async fn test_proxy(
+    State(ctx): State<Arc<ApiCtx>>,
+    Json(mut req): Json<ProxyTestReq>,
+) -> Result<Response, ApiError> {
+    // GET 已抹掉明文; 测试时没改密码就用已存的, 否则已开认证的代理会假失败
+    if req.proxy.pass.is_empty() {
+        req.proxy.pass = ctx.engine.settings().proxy.pass;
+    }
+    let r = ctx.engine.probe_url(&req.proxy, &req.url).await?;
+    Ok(Json(r).into_response())
+}
+
 async fn pause_all(State(ctx): State<Arc<ApiCtx>>) -> Result<Response, ApiError> {
     ctx.engine.pause_all()?;
     Ok(StatusCode::NO_CONTENT.into_response())
@@ -297,4 +374,17 @@ async fn ws_loop(mut socket: WebSocket, ctx: Arc<ApiCtx>) {
             }
         }
     }
+}
+
+#[derive(Deserialize)]
+struct ExtOrigin {
+    origin: String,
+}
+
+/// 扩展上报自身 origin, 写入 native host 白名单, 下次没跑 app 时仍能被拉起.
+async fn ext_origin(State(ctx): State<Arc<ApiCtx>>, Json(req): Json<ExtOrigin>) -> Result<Response, ApiError> {
+    crate::launch::remember_origin(&ctx.cfg_dir, &req.origin).map_err(|e| {
+        dd_core::CoreError::Other(e)
+    })?;
+    Ok(Json(json!({ "ok": true })).into_response())
 }

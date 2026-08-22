@@ -6,6 +6,8 @@ A cross-platform download manager, rewritten from [Neat Download Manager](https:
 
 Closing the window hides it to the tray. Downloads keep running.
 
+![Dash Download app](docs/app.png)
+
 ## Status
 
 v0.1 is usable on **macOS arm64**. Linux x86_64 and Windows x86_64 are built by GitHub Actions on tag; those hosts are not yet dogfooded.
@@ -52,7 +54,9 @@ Get a tagged build from [GitHub Releases](https://github.com/rayz2099/dash-downl
 | Linux x86_64 | `*.deb` | `sudo dpkg -i dash-download_*.deb` then `sudo apt-get install -f` if webkit deps are missing |
 | Windows x86_64 | NSIS `*.exe` | Run the installer |
 
-Start the app first. Closing the window keeps it in the tray.
+Start the app first. Closing the window keeps it in the tray. Login autostart is on by default so Chrome can wake the app via a launch-only native host.
+
+To ship auto-update artifacts, set repo secret `TAURI_SIGNING_PRIVATE_KEY` to the contents of the local gitignored `.secrets/updater.key`.
 
 Default download directory is the user Downloads folder. Core state:
 
@@ -71,7 +75,7 @@ The plugin is not on the Chrome Web Store yet. Load it unpacked.
 3. Chrome → `chrome://extensions` → Developer mode → Load unpacked → select the `dash-download-chrome` folder (the one that contains `manifest.json`)
 4. Popup only has takeover toggle + health. Reload the extension after updates
 
-If the app is not running, the browser download is left untouched. Right-click a link for a manual send. Files under 1 MB or `text/html` are not taken over.
+If the app is not running, the extension wakes it via native host and then takes over. If wake fails, the browser download is left untouched. Right-click a link to send manually (bypasses filters). Files under the size threshold (default 1 MB), `text/html`, or hosts on the popup deny-list are not taken over.
 
 From a git checkout you can skip the zip and load `extension/` directly.
 
@@ -90,7 +94,7 @@ git push origin v1.0.0
 | Job | Asset |
 |---|---|
 | macOS arm64 | `.app` + `.dmg` |
-| Linux x86_64 | `.deb` |
+| Linux x86_64 | `.deb` + AppImage (updater) |
 | Windows x86_64 | NSIS `.exe` |
 | Chrome MV3 | `dash-download-chrome-<tag>.zip` |
 
@@ -128,6 +132,8 @@ just open           # open the last macOS .app
 
 关窗缩到托盘, 下载不中断.
 
+![Dash Download app](docs/app.png)
+
 ## 状态
 
 v0.1 在 **macOS arm64** 可用. Linux x86_64 / Windows x86_64 由 tag 触发的 GitHub Actions 打包, 尚未在对应主机上日常使用.
@@ -159,7 +165,9 @@ v0.1 不做: 动态再切段, 限速, 代理, HLS/DASH/FTP, 视频嗅探.
 | Linux x86_64 | `*.deb` | `sudo dpkg -i dash-download_*.deb`, 缺 webkit 依赖再 `sudo apt-get install -f` |
 | Windows x86_64 | NSIS `*.exe` | 跑安装程序 |
 
-先启动 app. 关窗后仍在托盘.
+先启动 app, 关窗后仍在托盘. 默认开机自启. Chrome 扩展在 app 没跑时走 native host 拉起再接管; 拉不起才把下载留在浏览器.
+
+发自动更新包需要把本机 gitignore 的 `.secrets/updater.key` 全文配到仓库 secret `TAURI_SIGNING_PRIVATE_KEY`.
 
 默认下到用户 Downloads. 状态目录:
 
@@ -178,7 +186,7 @@ API: `127.0.0.1:41320`, 无配对 token.
 3. Chrome `chrome://extensions` 开发者模式 → 加载已解压的扩展 → 选带 `manifest.json` 的 `dash-download-chrome` 目录
 4. popup 只有接管开关和健康检查. 更新后需要重新加载扩展
 
-app 未运行时不接管, 浏览器原下载继续. 可右键链接手动发送. 小于 1MB 或 `text/html` 不接管.
+app 未运行时走 native host 拉起再接管; 拉不起则不 abort, 浏览器原下载继续. 右键链接手动发送不受过滤. 低于体积阈值 (默认 1MB), `text/html`, 或 popup 黑名单域名不接管.
 
 从源码目录开发时可以直接加载 `extension/`.
 
@@ -197,7 +205,7 @@ git push origin v1.0.0
 | Job | 资产 |
 |---|---|
 | macOS arm64 | `.app` + `.dmg` |
-| Linux x86_64 | `.deb` |
+| Linux x86_64 | `.deb` + AppImage (updater) |
 | Windows x86_64 | NSIS `.exe` |
 | Chrome MV3 | `dash-download-chrome-<tag>.zip` |
 

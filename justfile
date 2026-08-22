@@ -10,6 +10,9 @@ target_macos := "aarch64-apple-darwin"
 target_linux := "x86_64-unknown-linux-gnu"
 target_windows := "x86_64-pc-windows-msvc"
 
+# 本地 just 只要能跑的安装包. updater 签名走 CI 的 TAURI_SIGNING_PRIVATE_KEY, 避免本机无 TTY 时 minisign 抢密码失败.
+no_updater := '{"bundle":{"createUpdaterArtifacts":false}}'
+
 default:
     @just --list
 
@@ -41,17 +44,24 @@ open:
 # 编译 macOS arm64 (.app)
 macos-arm:
     rustup target add {{target_macos}}
-    cd "{{app_dir}}" && "{{tauri}}" build --target {{target_macos}} --bundles app
+    cd "{{app_dir}}" && "{{tauri}}" build --target {{target_macos}} --bundles app --config '{{no_updater}}'
     @echo "→ {{root}}/target/{{target_macos}}/release/bundle/macos/Dash Download.app"
 
 # 编译 Linux x86_64 (deb). 在非 Linux 主机上需要对应 linker / webkit sysroot, 本机 mac 上通常编不过
 linux-x86:
     rustup target add {{target_linux}}
-    cd "{{app_dir}}" && "{{tauri}}" build --target {{target_linux}} --bundles deb
+    cd "{{app_dir}}" && "{{tauri}}" build --target {{target_linux}} --bundles deb --config '{{no_updater}}'
     @echo "→ {{root}}/target/{{target_linux}}/release/bundle/deb/"
 
 # 编译 Windows x86_64 (nsis). 在非 Windows 主机上需要 cargo-xwin 或 msvc sysroot
 windows-x86:
     rustup target add {{target_windows}}
-    cd "{{app_dir}}" && "{{tauri}}" build --target {{target_windows}} --bundles nsis
+    cd "{{app_dir}}" && "{{tauri}}" build --target {{target_windows}} --bundles nsis --config '{{no_updater}}'
     @echo "→ {{root}}/target/{{target_windows}}/release/bundle/nsis/"
+
+# 更新检查/安装决策单测. GitHub Release 真包这条验收走这里, 不靠点 UI.
+test:
+    cargo test -p dd-app
+    cargo test -p dd-core
+    pnpm --dir ui test
+    node --test extension/policy.test.js

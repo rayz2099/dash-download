@@ -3,6 +3,9 @@
 
 Tauri / tauri-action 的默认文件名带空格和点 (Dash.Download_1.1.0_x64-setup.exe),
 updater 和手工分发都靠 URL 文件名; 先全部改名再重写 latest.json, 避免清单指向已删资产.
+
+下载必须走 `gh release download`. `gh api` 默认 Accept 是 JSON,
+会把资产元数据 (~1.6KB) 当成二进制传上去.
 """
 
 from __future__ import annotations
@@ -75,9 +78,11 @@ def canonical_name(filename: str, version: str) -> str | None:
 
 def rewrite_manifest(path: Path, version: str) -> None:
     data = json.loads(path.read_text())
-    platforms = data.get("platforms") or {}
+    if "platforms" not in data:
+        raise SystemExit(f"{path.name} is not an updater manifest: {list(data)[:8]}")
+    platforms = data["platforms"]
     for item in platforms.values():
-        url = item.get("url") or ""
+        url = item["url"]
         old_name = url.rsplit("/", 1)[-1]
         new_name = canonical_name(old_name, version)
         if new_name and new_name != old_name:
@@ -85,20 +90,28 @@ def rewrite_manifest(path: Path, version: str) -> None:
     path.write_text(json.dumps(data, indent=2) + "\n")
 
 
-def download_asset(repo: str, asset_id: int, dest: Path) -> None:
-    with dest.open("wb") as out:
-        run(
-            [
-                "gh",
-                "api",
-                f"/repos/{repo}/releases/assets/{asset_id}",
-                "-H",
-                "Accept: application/octet-stream",
-                "-H",
-                "Accept: application/vnd.github+json",
-            ],
-            stdout=out,
-        )
+def download_asset(
+    tag: str,
+    name: str,
+    dest: Path,
+    size: int,
+) -> None:
+    run(
+        [
+            "gh",
+            "release",
+            "download",
+            tag,
+            "--pattern",
+            name,
+            "--output",
+            str(dest),
+            "--clobber",
+        ]
+    )
+    got = dest.stat().st_size
+    if got != size:
+        raise SystemExit(f"{name}: downloaded {got} bytes, github size {size}")
 
 
 def main() -> int:
@@ -115,7 +128,7 @@ def main() -> int:
     ).stdout
     rel = json.loads(raw)
     assets = rel["assets"]
-    renames: list[tuple[str, str, Path]] = []
+    renames: list[tuple[str, str]] = []
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         for asset in assets:
@@ -124,20 +137,20 @@ def main() -> int:
             if new is None or new == old:
                 continue
             dest = tmp_path / new
-            print(f"rename {old} -> {new}")
-            download_asset(repo, asset["id"], dest)
+            print(f"rename {old} -> {new} ({asset['size']} bytes)")
+            download_asset(tag, old, dest, asset["size"])
             run(["gh", "release", "upload", tag, str(dest), "--clobber"])
-            renames.append((old, new, dest))
+            renames.append((old, new))
 
         # 清单必须在删旧文件名之前改 URL, 否则已装 app 拉 latest.json 会 404
         latest = next((a for a in assets if a["name"] == "latest.json"), None)
         if latest:
             dest = tmp_path / "latest.json"
-            download_asset(repo, latest["id"], dest)
+            download_asset(tag, "latest.json", dest, latest["size"])
             rewrite_manifest(dest, version)
             run(["gh", "release", "upload", tag, str(dest), "--clobber"])
 
-        for old, _new, _dest in renames:
+        for old, _new in renames:
             run(["gh", "release", "delete-asset", tag, old, "--yes"])
     return 0
 

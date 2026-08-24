@@ -1,3 +1,10 @@
+## 1.2.1 - 2026-08-24
+
+### 修复
+- Linux/Windows 打包不再因 macOS 专用 `RunEvent::Reopen` 失败
+- 新版本自动更新改走 GitHub Releases API, 不再依赖 `latest.json`
+- Release 有签名包才转正, 避免打到一半抢 latest 导致旧版检查 404
+
 ## 1.2.0 - 2026-08-24
 
 ### 新功能

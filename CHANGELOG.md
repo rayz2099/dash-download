@@ -1,3 +1,9 @@
+## 1.2.2 - 2026-08-24
+
+### Fixes
+- Release no longer uploads `latest.json`; 1.2.1+ clients update via GitHub Releases API
+- Asset rename runs against the draft `release_id` so it no longer 404s on `/releases/tags/{tag}`
+
 ## 1.2.1 - 2026-08-24
 
 ### Fixes

@@ -1,3 +1,9 @@
+## 1.2.2 - 2026-08-24
+
+### 修复
+- Release 不再上传 `latest.json`, 1.2.1+ 客户端走 GitHub Releases API 升级
+- 资产改名改用 draft 的 `release_id`, 不再打 `/releases/tags/{tag}` 吃 404
+
 ## 1.2.1 - 2026-08-24
 
 ### 修复

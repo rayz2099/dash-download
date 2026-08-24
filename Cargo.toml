@@ -4,7 +4,7 @@ members = ["crates/core", "crates/app"]
 exclude = ["vendor/librqbit"]
 
 [workspace.package]
-version = "1.2.1"
+version = "1.2.2"
 edition = "2021"
 license = "Apache-2.0"
 

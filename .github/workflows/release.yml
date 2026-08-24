@@ -1,9 +1,8 @@
-# 自动更新链路:
-# 1. prepare 先建 draft Release (不要立刻变成 /releases/latest, 否则 latest.json 还没上传时旧版检查 404)
+# 自动更新链路 (1.2.1+ 客户端读 GitHub /releases/latest, 不再要 latest.json):
+# 1. prepare 先建 draft, 避免打到一半抢 /releases/latest, 旧版会看到没 .sig 的半成品
 # 2. 各平台 tauri-action 把安装包 + .sig 挂到同一 Release
-# 3. updater-manifest 用已有 .sig 写 latest.json; 缺平台只 warning, 有 darwin 就能给 mac 用户升级
-# 4. normalize 改资产名并改写 latest.json 里的 URL
-# 5. publish 把 draft 转正, /releases/latest 才切过来
+# 3. normalize 用 release_id 改资产名 (draft 的 /releases/tags/{tag} 是 404)
+# 4. 有至少一对安装包+.sig 才把 draft 转正
 #
 # tag 推送打全平台; workflow_dispatch 可只打 macos / linux / windows / extension, 挂到已有 tag.
 name: release
@@ -144,107 +143,11 @@ jobs:
           args: ${{ matrix.args }}
 
 
-  # matrix 各自上传 latest.json 会互盖且可能漏传; 全部平台结束后按 .sig 重写一份.
-  updater-manifest:
-    needs: [prepare, app]
-    if: ${{ !cancelled() && needs.app.result != 'skipped' }}
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/github-script@v7
-        env:
-          RELEASE_TAG: ${{ env.RELEASE_TAG }}
-          PLATFORM: ${{ env.PLATFORM }}
-        with:
-          script: |
-            const { owner, repo } = context.repo;
-            const releaseId = Number("${{ needs.prepare.outputs.release_id }}");
-            const tag = process.env.RELEASE_TAG;
-            const release = (await github.rest.repos.getRelease({
-              owner, repo, release_id: releaseId,
-            })).data;
-            const assets = release.assets;
-            const find = (re) => assets.find((a) => re.test(a.name));
-            const readSig = async (asset) => {
-              const res = await github.request(`GET /repos/${owner}/${repo}/releases/assets/${asset.id}`, {
-                headers: { Accept: "application/octet-stream" },
-              });
-              if (typeof res.data === "string") return res.data.trim();
-              return Buffer.from(res.data).toString("utf8").trim();
-            };
-            const pair = async (key, fileRe, sigRe) => {
-              const file = find(fileRe);
-              const sig = find(sigRe);
-              if (!file || !sig) return null;
-              return [key, { url: file.browser_download_url, signature: await readSig(sig) }];
-            };
-            // Tauri 2 签的是 NSIS setup.exe, 不再出 nsis.zip.
-            const entries = (await Promise.all([
-              pair("darwin-aarch64", /\.app\.tar\.gz$/, /\.app\.tar\.gz\.sig$/),
-              pair("linux-x86_64", /\.AppImage$/, /\.AppImage\.sig$/),
-              pair("windows-x86_64", /x64-setup\.exe$/, /x64-setup\.exe\.sig$/),
-            ])).filter(Boolean);
-            const old = assets.find((a) => a.name === "latest.json");
-            let existing = {};
-            if (old) {
-              const res = await github.request(`GET /repos/${owner}/${repo}/releases/assets/${old.id}`, {
-                headers: { Accept: "application/octet-stream" },
-              });
-              const raw = typeof res.data === "string" ? res.data : Buffer.from(res.data).toString("utf8");
-              try {
-                existing = JSON.parse(raw).platforms || {};
-              } catch (err) {
-                core.warning("old latest.json parse: " + err.message);
-              }
-            }
-            const platforms = { ...existing, ...Object.fromEntries(entries) };
-            const missing = ["darwin-aarch64", "linux-x86_64", "windows-x86_64"]
-              .filter((k) => !platforms[k]);
-            if (!Object.keys(platforms).length) {
-              throw new Error("latest.json 没有任何平台 .sig, 旧版会检查 404");
-            }
-            if (missing.length) {
-              core.warning("latest.json 仍缺 (仍上传已有平台): " + missing.join(","));
-            }
-            const version = tag.replace(/^v/, "");
-            const body = {
-              version,
-              notes: tag,
-              pub_date: new Date().toISOString(),
-              platforms,
-            };
-            // 先上传再删旧文件, 窗口期内 latest.json 始终能 GET 到
-            await github.rest.repos.uploadReleaseAsset({
-              owner,
-              repo,
-              release_id: releaseId,
-              name: "latest.json.next",
-              data: JSON.stringify(body, null, 2),
-              headers: { "content-type": "application/json" },
-            });
-            const after = (await github.rest.repos.getRelease({ owner, repo, release_id: releaseId })).data.assets;
-            const staged = after.find((a) => a.name === "latest.json.next");
-            const prev = after.find((a) => a.name === "latest.json");
-            if (prev) {
-              await github.rest.repos.deleteReleaseAsset({ owner, repo, asset_id: prev.id });
-            }
-            // GitHub 不能 rename asset, 再传一份正式名后删 staging
-            await github.rest.repos.uploadReleaseAsset({
-              owner,
-              repo,
-              release_id: releaseId,
-              name: "latest.json",
-              data: JSON.stringify(body, null, 2),
-              headers: { "content-type": "application/json" },
-            });
-            if (staged) {
-              await github.rest.repos.deleteReleaseAsset({ owner, repo, asset_id: staged.id });
-            }
-            core.info("uploaded latest.json platforms=" + Object.keys(body.platforms).join(","));
-
-  # tauri-action 默认文件名带空格/点, 改成 DashDownload-{ver}-{os}-{arch} 后再让 prune 跑.
+  # tauri-action 默认文件名带空格/点, 改成 DashDownload-{ver}-{os}-{arch} 后再转正.
+  # 必须传 release_id: draft 的 /releases/tags/{tag} 是 404 (v1.2.1 就是这样挂的).
   normalize-assets:
-    needs: [prepare, updater-manifest, extension]
-    if: ${{ !cancelled() && (needs.updater-manifest.result == 'success' || needs.updater-manifest.result == 'skipped') }}
+    needs: [prepare, app, extension]
+    if: ${{ !cancelled() && (needs.app.result == 'success' || needs.app.result == 'skipped') }}
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -252,7 +155,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-        run: python3 .github/scripts/normalize_release_assets.py "${{ env.RELEASE_TAG }}"
+        run: python3 .github/scripts/normalize_release_assets.py "${{ env.RELEASE_TAG }}" "${{ needs.prepare.outputs.release_id }}"
 
   extension:
     needs: prepare
@@ -276,10 +179,11 @@ jobs:
           RELEASE_TAG: ${{ env.RELEASE_TAG }}
         run: gh release upload "${RELEASE_TAG}" "dash-download-chrome-${RELEASE_TAG}.zip" --clobber
 
-  # latest.json 就位后再把 draft 转正, /releases/latest 才切到本 tag
+  # 有安装包+.sig 才转正, /releases/latest 才切到本 tag. normalize 失败也不挡,
+  # 因为 1.2.1 客户端按后缀匹配, Tauri 默认文件名也能升.
   publish:
-    needs: [prepare, updater-manifest, normalize-assets]
-    if: ${{ !cancelled() && needs.updater-manifest.result == 'success' }}
+    needs: [prepare, app, normalize-assets]
+    if: ${{ !cancelled() && (needs.app.result == 'success' || needs.app.result == 'skipped') }}
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/github-script@v7
@@ -290,9 +194,16 @@ jobs:
             const release = (await github.rest.repos.getRelease({
               owner, repo, release_id: releaseId,
             })).data;
-            const hasJson = release.assets.some((a) => a.name === "latest.json");
-            if (!hasJson) {
-              core.warning("no latest.json, leave draft unpublished");
+            const names = new Set(release.assets.map((a) => a.name));
+            const hasPair = [...names].some((n) => {
+              if (!names.has(n + ".sig")) return false;
+              return n.endsWith(".app.tar.gz")
+                || n.endsWith(".AppImage")
+                || n.endsWith("x64-setup.exe")
+                || n.endsWith("win-x64.exe");
+            });
+            if (!hasPair) {
+              core.warning("no installer+.sig pair, leave draft unpublished");
               return;
             }
             if (!release.draft) {
@@ -305,7 +216,7 @@ jobs:
             core.info("published " + release.tag_name);
 
   prune:
-    needs: [app, extension, updater-manifest, normalize-assets, publish]
+    needs: [app, extension, normalize-assets, publish]
     if: ${{ github.event_name == 'push' && !cancelled() }}
     runs-on: ubuntu-22.04
     steps:

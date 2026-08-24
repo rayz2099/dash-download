@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """把 Release 资产改成 DashDownload-{ver}-{os}-{arch}.ext.
 
-Tauri / tauri-action 的默认文件名带空格和点 (Dash.Download_1.1.0_x64-setup.exe),
-updater 和手工分发都靠 URL 文件名; 先全部改名再重写 latest.json, 避免清单指向已删资产.
+Tauri / tauri-action 默认文件名带空格和点 (Dash.Download_1.1.0_x64-setup.exe).
+手工分发靠干净文件名; 1.2.1 起 updater 走 GitHub API 按后缀匹配, 不读 latest.json.
 
-下载必须走 `gh release download`. `gh api` 默认 Accept 是 JSON,
-会把资产元数据 (~1.6KB) 当成二进制传上去.
+必须用 release_id: GET /releases/tags/{tag} 对 draft 返回 404,
+而发版流水线在转正之前就要改名.
+下载走 asset id + Accept: application/octet-stream.
+`gh api` 默认 Accept 是 JSON, 会把 ~1.6KB 元数据当成二进制.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import urllib.parse
 from pathlib import Path
 
 APP = "DashDownload"
@@ -45,8 +48,8 @@ def tag_version(tag: str) -> str:
 
 
 def canonical_name(filename: str, version: str) -> str | None:
-    """未知或不该改的文件返回 None, 避免误伤 latest.json / source tarball."""
-    if filename in {"latest.json"} or filename.startswith("Source code"):
+    """未知或不该改的文件返回 None, 避免误伤 source tarball."""
+    if filename.startswith("Source code"):
         return None
     prefix = f"{APP}-{version}-"
     if filename.startswith(prefix):
@@ -76,59 +79,87 @@ def canonical_name(filename: str, version: str) -> str | None:
     return None
 
 
-def rewrite_manifest(path: Path, version: str) -> None:
-    data = json.loads(path.read_text())
-    if "platforms" not in data:
-        raise SystemExit(f"{path.name} is not an updater manifest: {list(data)[:8]}")
-    platforms = data["platforms"]
-    for item in platforms.values():
-        url = item["url"]
-        old_name = url.rsplit("/", 1)[-1]
-        new_name = canonical_name(old_name, version)
-        if new_name and new_name != old_name:
-            item["url"] = url[: -len(old_name)] + new_name
-    path.write_text(json.dumps(data, indent=2) + "\n")
+def gh_api_json(path: str) -> dict:
+    raw = run(
+        ["gh", "api", path],
+        capture_output=True,
+        text=True,
+    ).stdout
+    return json.loads(raw)
 
 
-def download_asset(
-    tag: str,
-    name: str,
-    dest: Path,
-    size: int,
-) -> None:
+def download_asset(repo: str, asset_id: int, dest: Path, size: int) -> None:
+    # draft 不能靠 tag 下载; octet-stream 才能拿到真实字节而不是 asset JSON.
+    with dest.open("wb") as out:
+        run(
+            [
+                "gh",
+                "api",
+                "-H",
+                "Accept: application/octet-stream",
+                f"repos/{repo}/releases/assets/{asset_id}",
+            ],
+            stdout=out,
+        )
+    got = dest.stat().st_size
+    if got != size:
+        raise SystemExit(f"asset {asset_id}: downloaded {got} bytes, github size {size}")
+
+
+def upload_asset(repo: str, release_id: int, path: Path, name: str) -> None:
+    q = urllib.parse.urlencode({"name": name})
     run(
         [
             "gh",
-            "release",
-            "download",
-            tag,
-            "--pattern",
-            name,
-            "--output",
-            str(dest),
-            "--clobber",
-        ]
+            "api",
+            "--method",
+            "POST",
+            "--hostname",
+            "uploads.github.com",
+            "-H",
+            "Accept: application/vnd.github+json",
+            "-H",
+            "Content-Type: application/octet-stream",
+            "--input",
+            str(path),
+            f"repos/{repo}/releases/{release_id}/assets?{q}",
+        ],
+        capture_output=True,
     )
-    got = dest.stat().st_size
-    if got != size:
-        raise SystemExit(f"{name}: downloaded {got} bytes, github size {size}")
+
+
+def delete_asset(repo: str, asset_id: int) -> None:
+    run(
+        [
+            "gh",
+            "api",
+            "--method",
+            "DELETE",
+            f"repos/{repo}/releases/assets/{asset_id}",
+        ],
+        capture_output=True,
+    )
 
 
 def main() -> int:
-    if len(sys.argv) != 2:
-        print("usage: normalize_release_assets.py <tag>", file=sys.stderr)
+    if len(sys.argv) not in (2, 3):
+        print(
+            "usage: normalize_release_assets.py <tag> [release_id]",
+            file=sys.stderr,
+        )
         return 2
     tag = sys.argv[1]
     version = tag_version(tag)
     repo = repo_slug()
-    raw = run(
-        ["gh", "api", f"repos/{repo}/releases/tags/{tag}"],
-        capture_output=True,
-        text=True,
-    ).stdout
-    rel = json.loads(raw)
+    if len(sys.argv) == 3 and sys.argv[2]:
+        release_id = sys.argv[2]
+        rel = gh_api_json(f"repos/{repo}/releases/{release_id}")
+    else:
+        # 已转正的 Release 才能按 tag 查; draft 必须传 release_id.
+        rel = gh_api_json(f"repos/{repo}/releases/tags/{tag}")
+        release_id = str(rel["id"])
     assets = rel["assets"]
-    renames: list[tuple[str, str]] = []
+    by_name = {a["name"]: a for a in assets}
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         for asset in assets:
@@ -136,22 +167,15 @@ def main() -> int:
             new = canonical_name(old, version)
             if new is None or new == old:
                 continue
+            if new in by_name:
+                print(f"skip {old}: {new} already exists")
+                continue
             dest = tmp_path / new
             print(f"rename {old} -> {new} ({asset['size']} bytes)")
-            download_asset(tag, old, dest, asset["size"])
-            run(["gh", "release", "upload", tag, str(dest), "--clobber"])
-            renames.append((old, new))
-
-        # 清单必须在删旧文件名之前改 URL, 否则已装 app 拉 latest.json 会 404
-        latest = next((a for a in assets if a["name"] == "latest.json"), None)
-        if latest:
-            dest = tmp_path / "latest.json"
-            download_asset(tag, "latest.json", dest, latest["size"])
-            rewrite_manifest(dest, version)
-            run(["gh", "release", "upload", tag, str(dest), "--clobber"])
-
-        for old, _new in renames:
-            run(["gh", "release", "delete-asset", tag, old, "--yes"])
+            download_asset(repo, int(asset["id"]), dest, asset["size"])
+            upload_asset(repo, int(release_id), dest, new)
+            delete_asset(repo, int(asset["id"]))
+            by_name[new] = asset
     return 0
 
 

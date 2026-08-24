@@ -180,6 +180,25 @@ mod tests {
     }
 
     #[test]
+    fn release_config_allows_loopback_http_manifest() {
+        // 1.2.1 把清单改到本机 http, 但没开 dangerousInsecureTransportProtocol.
+        // plugin 在 release 反序列化阶段直接 Err, tauri::Builder.build expect 掉, 包永远打不开.
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).expect("tauri.conf.json");
+        let up = &conf["plugins"]["updater"];
+        let endpoints = up["endpoints"].as_array().expect("endpoints");
+        assert!(
+            endpoints.iter().any(|e| e.as_str() == Some(MANIFEST_URL)),
+            "endpoints 必须是 loopback 清单 {MANIFEST_URL}, 实际 {endpoints:?}"
+        );
+        assert_eq!(
+            up["dangerousInsecureTransportProtocol"].as_bool(),
+            Some(true),
+            "loopback http 必须显式放行, 否则 release 启动即 panic"
+        );
+    }
+
+    #[test]
     fn windows_accepts_nsis_setup_name() {
         let assets = vec![
             asset("Dash.Download_1.2.0_x64-setup.exe"),

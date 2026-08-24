@@ -1,3 +1,10 @@
+## 1.2.1 - 2026-08-24
+
+### Fixes
+- Linux/Windows pack no longer fails on macOS-only `RunEvent::Reopen`
+- Auto-update no longer depends on `latest.json` for new builds; it reads GitHub Releases API
+- Release workflow stays draft until signed packages exist, so `/releases/latest` does not 404 mid-build
+
 ## 1.2.0 - 2026-08-24
 
 ### Features

@@ -1,3 +1,8 @@
+## 1.2.5 - 2026-08-24
+
+### Fixes
+- Ship a newer GitHub Release so 1.2.4 clients can exercise the in-app updater
+
 ## 1.2.4 - 2026-08-24
 
 ### Fixes

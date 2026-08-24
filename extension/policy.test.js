@@ -72,6 +72,13 @@ test("minBytes=0 关闭体积过滤", () => {
   }, { minBytes: 0 }), true);
 });
 
+test("磁力与种子始终接管", () => {
+  assert.equal(shouldTakeover({ url: "magnet:?xt=urn:btih:abc" }), true);
+  assert.equal(shouldTakeover({
+    url: "https://cdn.example/a.torrent", fileSize: 12, mime: "application/x-bittorrent",
+  }), true);
+});
+
 test("浏览器内部协议不接管", () => {
   assert.equal(shouldTakeover({ url: "chrome://downloads" }), false);
   assert.equal(shouldTakeover({ url: "chrome-extension://abc/a.bin" }), false);

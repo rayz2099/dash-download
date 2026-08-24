@@ -48,7 +48,14 @@ impl From<dd_core::CoreError> for ApiError {
 pub async fn serve(ctx: Arc<ApiCtx>, port: u16) -> std::io::Result<()> {
     let cors = CorsLayer::new()
         .allow_origin(AllowOrigin::predicate(|origin, _req| origin_ok(origin)))
-        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS])
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
         .allow_headers([
             header::CONTENT_TYPE,
             HeaderName::from_static("x-dd-client"),
@@ -68,6 +75,11 @@ pub async fn serve(ctx: Arc<ApiCtx>, port: u16) -> std::io::Result<()> {
         .route("/api/proxy-test", post(test_proxy))
         .route("/api/focus", post(focus_window))
         .route("/api/ext-origin", post(ext_origin))
+        .route("/api/torrents", get(list_torrents).post(add_torrent))
+        .route("/api/torrents/{id}/pause", post(pause_torrent))
+        .route("/api/torrents/{id}/resume", post(resume_torrent))
+        .route("/api/torrents/{id}/files", axum::routing::patch(select_files))
+        .route("/api/torrents/{id}", delete(remove_torrent))
         // blob 导入走 JSON base64, 默认 2MB 不够盖住页面生成的图
         .layer(DefaultBodyLimit::max(32 * 1024 * 1024))
         .layer(middleware::from_fn(check_client));
@@ -131,8 +143,12 @@ async fn check_client(headers: HeaderMap, req: axum::extract::Request, next: Nex
     next.run(req).await
 }
 
-async fn ping() -> impl IntoResponse {
-    Json(json!({ "name": "dash-download", "version": env!("CARGO_PKG_VERSION") }))
+async fn ping(State(ctx): State<Arc<ApiCtx>>) -> impl IntoResponse {
+    Json(json!({
+        "name": "dash-download",
+        "version": env!("CARGO_PKG_VERSION"),
+        "p2p": ctx.engine.settings().p2p,
+    }))
 }
 
 async fn list_tasks(State(ctx): State<Arc<ApiCtx>>) -> Result<Response, ApiError> {
@@ -268,6 +284,7 @@ fn settings_json(s: EngineSettings) -> Json<Value> {
     s.proxy.pass.clear();
     let mut v = serde_json::to_value(&s).expect("settings 可序列化");
     v["proxy"]["pass_set"] = json!(pass_set);
+    v["bt_direct"] = json!(s.bt_direct());
     Json(v)
 }
 
@@ -333,15 +350,20 @@ async fn ws_handler(
     upgrade.on_upgrade(move |socket| ws_loop(socket, ctx))
 }
 
+async fn send_snapshot(socket: &mut WebSocket, ctx: &ApiCtx) -> bool {
+    let msg = match (ctx.engine.list(), ctx.engine.list_torrents()) {
+        (Ok(tasks), Ok(torrents)) => json!({ "type": "snapshot", "tasks": tasks, "torrents": torrents }),
+        (Err(e), _) | (_, Err(e)) => json!({ "type": "error", "error": e.to_string() }),
+    };
+    socket.send(Message::text(msg.to_string())).await.is_ok()
+}
+
 /// WS 推送: 连接时先发全量快照, 之后转发引擎事件流.
 /// 客户端断线由 send 失败自然终止循环, 无需心跳 (localhost 不存在中间设备超时)
 async fn ws_loop(mut socket: WebSocket, ctx: Arc<ApiCtx>) {
     let mut events = ctx.engine.subscribe();
-    let snapshot = match ctx.engine.list() {
-        Ok(tasks) => json!({ "type": "snapshot", "tasks": tasks }),
-        Err(e) => json!({ "type": "error", "error": e.to_string() }),
-    };
-    if socket.send(Message::text(snapshot.to_string())).await.is_err() {
+    let mut events_t = ctx.engine.subscribe_torrents();
+    if !send_snapshot(&mut socket, &ctx).await {
         return;
     }
     loop {
@@ -349,15 +371,21 @@ async fn ws_loop(mut socket: WebSocket, ctx: Arc<ApiCtx>) {
             ev = events.recv() => {
                 let ev = match ev {
                     Ok(ev) => ev,
-                    // 消费太慢被挤掉队 (lagged): 重发快照对齐状态
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        if let Ok(tasks) = ctx.engine.list() {
-                            let msg = json!({ "type": "snapshot", "tasks": tasks });
-                            if socket.send(Message::text(msg.to_string())).await.is_err() {
-                                return;
-                            }
-                        }
-                        continue;
+                        if send_snapshot(&mut socket, &ctx).await { continue; } else { return; }
+                    }
+                    Err(_) => return,
+                };
+                let payload = serde_json::to_string(&ev).unwrap_or_default();
+                if socket.send(Message::text(payload)).await.is_err() {
+                    return;
+                }
+            }
+            ev = events_t.recv() => {
+                let ev = match ev {
+                    Ok(ev) => ev,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        if send_snapshot(&mut socket, &ctx).await { continue; } else { return; }
                     }
                     Err(_) => return,
                 };
@@ -387,4 +415,79 @@ async fn ext_origin(State(ctx): State<Arc<ApiCtx>>, Json(req): Json<ExtOrigin>) 
         dd_core::CoreError::Other(e)
     })?;
     Ok(Json(json!({ "ok": true })).into_response())
+}
+
+async fn list_torrents(State(ctx): State<Arc<ApiCtx>>) -> Result<Response, ApiError> {
+    Ok(Json(ctx.engine.list_torrents()?).into_response())
+}
+
+#[derive(Deserialize)]
+struct AddTorrentReq {
+    magnet: Option<String>,
+    torrent_b64: Option<String>,
+    torrent_url: Option<String>,
+    dir: Option<String>,
+    #[serde(default)]
+    headers: Vec<(String, String)>,
+}
+
+async fn add_torrent(
+    State(ctx): State<Arc<ApiCtx>>,
+    Json(req): Json<AddTorrentReq>,
+) -> Result<Response, ApiError> {
+    let t = if let Some(m) = req.magnet.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        ctx.engine.add_magnet(m, req.dir)?
+    } else if let Some(b64) = req.torrent_b64.as_deref() {
+        let bytes = STANDARD
+            .decode(b64.trim())
+            .map_err(|e| ApiError(CoreError::Other(format!("torrent_b64 非法: {e}"))))?;
+        ctx.engine.add_torrent_bytes(&bytes, "torrent", req.dir)?
+    } else if let Some(url) = req.torrent_url.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let bytes = ctx.engine.fetch_torrent_url(url, &req.headers).await?;
+        ctx.engine.add_torrent_bytes(&bytes, url, req.dir)?
+    } else {
+        return Err(ApiError(CoreError::Other(
+            "需要 magnet / torrent_b64 / torrent_url".into(),
+        )));
+    };
+    show_main(&ctx);
+    Ok(Json(t).into_response())
+}
+
+async fn pause_torrent(
+    State(ctx): State<Arc<ApiCtx>>,
+    Path(id): Path<i64>,
+) -> Result<Response, ApiError> {
+    ctx.engine.pause_torrent(id)?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn resume_torrent(
+    State(ctx): State<Arc<ApiCtx>>,
+    Path(id): Path<i64>,
+) -> Result<Response, ApiError> {
+    ctx.engine.resume_torrent(id)?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+#[derive(Deserialize)]
+struct SelectReq {
+    selected: Vec<u32>,
+}
+
+async fn select_files(
+    State(ctx): State<Arc<ApiCtx>>,
+    Path(id): Path<i64>,
+    Json(req): Json<SelectReq>,
+) -> Result<Response, ApiError> {
+    Ok(Json(ctx.engine.select_torrent_files(id, req.selected)?).into_response())
+}
+
+async fn remove_torrent(
+    State(ctx): State<Arc<ApiCtx>>,
+    Path(id): Path<i64>,
+    Query(q): Query<RemoveQuery>,
+) -> Result<Response, ApiError> {
+    ctx.engine.remove_torrent(id, q.delete_file).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }

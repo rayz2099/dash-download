@@ -5,6 +5,67 @@ import { open } from "@tauri-apps/plugin-dialog";
 export type TaskState =
   | "queued" | "probing" | "active" | "paused" | "completed" | "failed" | "canceled";
 
+export type TorrentState =
+  | "resolving" | "awaiting_selection" | "queued" | "active" | "seeding" | "paused" | "failed";
+
+export interface TorrentPeer {
+  addr: string;
+  client: string;
+  state: string;
+  down: number;
+  up: number;
+  kind: string;
+  chunks?: number;
+  pieces?: number;
+  piece_ms?: number;
+  conn_ms?: number;
+  attempts?: number;
+  errors?: number;
+  incoming?: boolean;
+}
+
+export interface TorrentFile {
+  idx: number;
+  path: string;
+  size: number;
+  selected: boolean;
+}
+
+export interface TorrentInfo {
+  id: number;
+  infohash: string;
+  source: string;
+  name: string;
+  dir: string;
+  state: TorrentState;
+  done: number;
+  size: number | null;
+  speed: number;
+  up_speed: number;
+  error: string;
+  files: TorrentFile[];
+  peers: number;
+  seen?: number;
+  connecting?: number;
+  peer_list?: TorrentPeer[];
+  phase?: string;
+  bt_direct: boolean;
+  created_at: number;
+  completed_at: number | null;
+}
+
+export interface TorrentProgress {
+  id: number;
+  done: number;
+  speed: number;
+  up_speed: number;
+  peers: number;
+  seen?: number;
+  connecting?: number;
+  phase?: string;
+  peer_list?: TorrentPeer[];
+}
+
 export interface SegmentInfo {
   idx: number;
   start: number;
@@ -40,11 +101,17 @@ export interface TaskProgress {
 }
 
 export type EngineEvent =
-  | { type: "snapshot"; tasks: TaskInfo[] }
+  | { type: "snapshot"; tasks: TaskInfo[]; torrents?: TorrentInfo[] }
   | { type: "task_added"; task: TaskInfo }
   | { type: "task_updated"; task: TaskInfo }
   | { type: "task_removed"; id: number }
-  | { type: "progress"; tasks: TaskProgress[] };
+  | { type: "progress"; tasks: TaskProgress[] }
+  | { type: "torrent_added"; torrent: TorrentInfo }
+  | { type: "torrent_updated"; torrent: TorrentInfo }
+  | { type: "torrent_removed"; id: number }
+  | { type: "torrent_progress"; torrents: TorrentProgress[] }
+  | { type: "resolving"; torrent: TorrentInfo }
+  | { type: "resolve_failed"; id: number; source: string; error: string };
 
 export interface Boot {
   port: number;
@@ -102,8 +169,24 @@ export const removeTask = (id: number, deleteFile = true) =>
   req<void>("DELETE", `/api/tasks/${id}?delete_file=${deleteFile}`);
 export const pauseAll = () => req<void>("POST", "/api/pause-all");
 export const resumeAll = () => req<void>("POST", "/api/resume-all");
-export const revealFile = (path: string) => invoke("reveal", { path });
-export const openPath = (path: string) => invoke("open_path", { path });
+
+export const addTorrent = (r: {
+  magnet?: string;
+  torrent_b64?: string;
+  torrent_url?: string;
+  dir?: string;
+  headers?: [string, string][];
+}) => req<TorrentInfo>("POST", "/api/torrents", r);
+export const pauseTorrent = (id: number) => req<void>("POST", `/api/torrents/${id}/pause`);
+export const resumeTorrent = (id: number) => req<void>("POST", `/api/torrents/${id}/resume`);
+export const selectTorrentFiles = (id: number, selected: number[]) =>
+  req<TorrentInfo>("PATCH", `/api/torrents/${id}/files`, { selected });
+export const removeTorrent = (id: number, deleteFile = true) =>
+  req<void>("DELETE", `/api/torrents/${id}?delete_file=${deleteFile}`);
+export const revealFile = (path: string, fallback?: string) =>
+  invoke("reveal", { path, fallback: fallback ?? null });
+export const openPath = (path: string, fallback?: string) =>
+  invoke("open_path", { path, fallback: fallback ?? null });
 
 /// WS 事件流: 断线 2s 自动重连, 重连后服务端会重发快照对齐状态
 export function connectEvents(onEvent: (ev: EngineEvent) => void): () => void {
@@ -171,6 +254,14 @@ export interface EngineSettings {
   max_concurrent: number;
   max_segments: number;
   proxy: ProxyCfg;
+  max_bt_active: number;
+  max_bt_seed: number;
+  listen_port: number;
+  upnp: boolean;
+  extra_trackers: boolean;
+  resolve_secs: number;
+  p2p: boolean;
+  bt_direct?: boolean;
 }
 
 export const MAX_CONN = 128;

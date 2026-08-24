@@ -59,7 +59,9 @@
     if (/^(chrome|chrome-extension|about|edge|devtools|javascript|mailto):/i.test(url)) {
       return false;
     }
+    if (/^magnet:/i.test(url)) return true;
     const mime = ((item && item.mime) || "").split(";")[0].trim().toLowerCase();
+    if (mime === "application/x-bittorrent" || /\.torrent(\?|#|$)/i.test(url)) return true;
     if (mime === "text/html") return false;
     const minBytes = rules && Number.isFinite(Number(rules.minBytes))
       ? Number(rules.minBytes)

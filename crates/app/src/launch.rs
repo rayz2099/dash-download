@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 pub const HOST_NAME: &str = "dev.ray.dash_download";
+pub const API_PORT: u16 = 41320;
 /// 扩展 manifest.key 算出的稳定 ID, 未连上 API 也能写进 native host 白名单.
 pub const EXT_ID: &str = "agdjpgikicokkkbdgmdmhdpbhljieech";
 pub const EXT_ORIGIN: &str = "chrome-extension://agdjpgikicokkkbdgmdmhdpbhljieech/";
@@ -35,7 +36,7 @@ pub fn remember_origin(cfg_dir: &Path, origin: &str) -> Result<(), String> {
 }
 
 pub fn api_up() -> bool {
-    let sock = std::net::SocketAddr::from(([127, 0, 0, 1], 41320));
+    let sock = std::net::SocketAddr::from(([127, 0, 0, 1], API_PORT));
     TcpStream::connect_timeout(&sock, Duration::from_millis(200)).is_ok()
 }
 

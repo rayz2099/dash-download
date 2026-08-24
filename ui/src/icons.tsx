@@ -184,14 +184,22 @@ export const IcoFile = (p: P) => (
     <path d="M14 2v4a2 2 0 0 0 2 2h4" />
   </Ico>
 );
+export const IcoImage = (p: P) => (
+  <Ico {...p}>
+    <rect width="18" height="18" x="3" y="3" rx="2" />
+    <circle cx="9" cy="9" r="2" />
+    <path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" />
+  </Ico>
+);
 
 export function TypeIcon({ type, size = 16 }: { type: FileType; size?: number }): JSX.Element {
   switch (type) {
     case "video": return <IcoFilm size={size} />;
+    case "audio": return <IcoMusic size={size} />;
+    case "image": return <IcoImage size={size} />;
     case "doc": return <IcoDoc size={size} />;
     case "archive": return <IcoBox size={size} />;
     case "app": return <IcoApp size={size} />;
-    case "audio": return <IcoMusic size={size} />;
     default: return <IcoFile size={size} />;
   }
 }

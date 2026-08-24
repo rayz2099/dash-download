@@ -1,8 +1,10 @@
+use crate::bt::{self, BtCtl};
 use crate::error::{CoreError, Result};
 use crate::probe::{probe, sanitize};
 use crate::runner::{plan_segments, replan_remaining, run_segment, run_stream, SegOutcome};
 use crate::settings::{EngineSettings, ProxyCfg, ProxyKind, ProxyProbe, MAX_CONN, MAX_IMPORT_BYTES};
 use crate::store::Store;
+use crate::torrent::{TorrentEvent, TorrentInfo, TorrentState};
 use crate::types::{
     AddTaskOptions, EngineEvent, RequestContext, SegmentInfo, TaskInfo, TaskProgress, TaskState,
 };
@@ -15,42 +17,36 @@ use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinSet;
 
+/// 构造期参数. 运行时偏好只活在 Inner.live, 避免跟 EngineSettings 再抄一份字段.
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     pub db_path: PathBuf,
-    pub default_dir: PathBuf,
-    /// 同时下载任务数, 超出进入队列
-    pub max_concurrent: usize,
-    /// 每任务最大 Segment 数
-    pub max_segments: u32,
+    pub settings: EngineSettings,
     /// 低于此值不再切分
     pub min_segment_size: u64,
     /// Segment 无进度重试上限
     pub retry_limit: u32,
     pub user_agent: String,
-    pub proxy: ProxyCfg,
 }
 
 impl EngineConfig {
     pub fn new(db_path: PathBuf, default_dir: PathBuf) -> Self {
+        Self::with_settings(
+            db_path,
+            EngineSettings {
+                default_dir: default_dir.to_string_lossy().into_owned(),
+                ..EngineSettings::default()
+            },
+        )
+    }
+
+    pub fn with_settings(db_path: PathBuf, settings: EngineSettings) -> Self {
         EngineConfig {
             db_path,
-            default_dir,
-            max_concurrent: 3,
-            max_segments: 8,
+            settings,
             min_segment_size: 1024 * 1024,
             retry_limit: 5,
             user_agent: format!("dash-download/{}", env!("CARGO_PKG_VERSION")),
-            proxy: ProxyCfg::default(),
-        }
-    }
-
-    fn to_settings(&self) -> EngineSettings {
-        EngineSettings {
-            default_dir: self.default_dir.to_string_lossy().into_owned(),
-            max_concurrent: self.max_concurrent as u32,
-            max_segments: self.max_segments,
-            proxy: self.proxy.clone(),
         }
     }
 }
@@ -93,14 +89,27 @@ struct Running {
     segs: Vec<(u32, Arc<AtomicU64>)>,
 }
 
-struct Inner {
-    cfg: EngineConfig,
-    live: Mutex<EngineSettings>,
-    client: Mutex<reqwest::Client>,
-    store: Mutex<Store>,
+pub(crate) struct Inner {
+    pub(crate) cfg: EngineConfig,
+    pub(crate) live: Mutex<EngineSettings>,
+    pub(crate) client: Mutex<reqwest::Client>,
+    pub(crate) store: Mutex<Store>,
     running: Mutex<HashMap<i64, Running>>,
     speeds: Mutex<HashMap<i64, u64>>,
     events: broadcast::Sender<EngineEvent>,
+    pub(crate) torrent_ev: broadcast::Sender<TorrentEvent>,
+    /// Session 后台起来, 避免 UPnP/DHT 挡住窗口
+    pub(crate) bt: Mutex<Option<BtCtl>>,
+    /// boot 已 spawn 但 Session::new 还没返回, 防止开关连点开出两个 session
+    pub(crate) bt_starting: AtomicBool,
+    /// Resolve 任务的取消开关, X 掉解析层时置 true
+    pub(crate) resolve_abort: Mutex<HashMap<i64, watch::Sender<bool>>>,
+    /// XIU2 best 优先, ngosang 补集. 启动时内置, 随后刷新.
+    pub(crate) pub_trackers: Mutex<Vec<String>>,
+    /// 避免 kick_bt 重入把同一个 queued 加进 swarm 两次.
+    pub(crate) bt_busy: AtomicBool,
+    /// rebuild 时 +1, 过期的 Session::new 不能写回 bt.
+    pub(crate) bt_gen: AtomicU64,
 }
 
 /// 引擎门面: 所有客户端 (Tauri UI / 扩展 API / CLI) 的唯一入口.
@@ -111,28 +120,140 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub fn new(cfg: EngineConfig) -> Result<Engine> {
+    pub async fn new(cfg: EngineConfig) -> Result<Engine> {
         let store = Store::open(&cfg.db_path)?;
         store.recover_interrupted()?;
-        let live = cfg.to_settings();
+        let live = cfg.settings.clone();
         live.validate()?;
         let client = build_client(&cfg.user_agent, &live.proxy)?;
         let (events, _) = broadcast::channel(512);
+        let (torrent_ev, _) = broadcast::channel(512);
         let inner = Arc::new(Inner {
             cfg,
-            live: Mutex::new(live),
+            live: Mutex::new(live.clone()),
             client: Mutex::new(client),
             store: Mutex::new(store),
             running: Mutex::new(HashMap::new()),
             speeds: Mutex::new(HashMap::new()),
             events,
+            torrent_ev,
+            bt: Mutex::new(None),
+            bt_starting: AtomicBool::new(false),
+            resolve_abort: Mutex::new(HashMap::new()),
+            pub_trackers: Mutex::new(crate::trackers::baked()),
+            bt_busy: AtomicBool::new(false),
+            bt_gen: AtomicU64::new(0),
         });
+        tracing::info!("engine http ready");
         tokio::spawn(sampler_loop(inner.clone()));
+        // HTTP 缓存解析不依赖 P2P session, 重启后把半截 Resolving 捞回来
+        inner.clone().resume_pending_resolve();
+        bt::boot(inner.clone());
         Ok(Engine { inner })
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<EngineEvent> {
         self.inner.events.subscribe()
+    }
+
+    pub fn subscribe_torrents(&self) -> broadcast::Receiver<TorrentEvent> {
+        self.inner.torrent_ev.subscribe()
+    }
+
+    pub fn list_torrents(&self) -> Result<Vec<TorrentInfo>> {
+        let mut rows = self.inner.store.lock().unwrap().list_torrents()?;
+        // Resolving 还没 Metainfo, 不进下载列表
+        rows.retain(|t| t.state != TorrentState::Resolving);
+        for t in &mut rows {
+            self.inner.overlay_torrent(t);
+        }
+        Ok(rows)
+    }
+
+    pub fn torrent(&self, id: i64) -> Result<TorrentInfo> {
+        self.inner.torrent_info(id)
+    }
+
+    pub fn add_magnet(&self, magnet: &str, dir: Option<String>) -> Result<TorrentInfo> {
+        // 解析走 HTTP 缓存, 不要求开 P2P. DHT 回退才要 session.
+        let (info, dup) = self.inner.add_magnet_row(magnet, dir)?;
+        if info.state == TorrentState::Resolving {
+            let live = self.inner.resolve_abort.lock().unwrap().contains_key(&info.id);
+            if !dup || !live {
+                self.inner
+                    .clone()
+                    .spawn_resolve(info.id, magnet.trim().to_string());
+            }
+        } else if dup {
+            // 重复 Infohash 也走 TorrentAdded: UI 才能聚焦已有行 / 重开选文件.
+            self.inner
+                .emit_torrent(TorrentEvent::TorrentAdded { torrent: info.clone() });
+        }
+        Ok(info)
+    }
+
+    pub fn add_torrent_bytes(
+        &self,
+        bytes: &[u8],
+        source: &str,
+        dir: Option<String>,
+    ) -> Result<TorrentInfo> {
+        // .torrent 字节已是 Metainfo, 列文件不打 DHT.
+        let (info, dup) = self.inner.add_bytes_row(bytes, source, dir)?;
+        if dup {
+            self.inner
+                .emit_torrent(TorrentEvent::TorrentAdded { torrent: info.clone() });
+        }
+        if !dup && info.state == TorrentState::Queued {
+            Inner::kick_bt(self.inner.clone());
+        }
+        Ok(info)
+    }
+
+    pub fn select_torrent_files(&self, id: i64, selected: Vec<u32>) -> Result<TorrentInfo> {
+        let info = self.inner.select_files(id, selected)?;
+        Inner::kick_bt(self.inner.clone());
+        Ok(info)
+    }
+
+    pub fn pause_torrent(&self, id: i64) -> Result<()> {
+        self.inner.pause_torrent(id, true)
+    }
+
+    pub fn resume_torrent(&self, id: i64) -> Result<()> {
+        self.inner.require_p2p()?;
+        self.inner.resume_torrent(id)?;
+        Inner::kick_bt(self.inner.clone());
+        Ok(())
+    }
+
+    pub async fn remove_torrent(&self, id: i64, delete_file: bool) -> Result<()> {
+        self.inner.remove_torrent(id, delete_file).await?;
+        Inner::kick_bt(self.inner.clone());
+        Ok(())
+    }
+
+    pub async fn fetch_torrent_url(&self, url: &str, headers: &[(String, String)]) -> Result<Vec<u8>> {
+        let client = self.inner.client.lock().unwrap().clone();
+        let mut req = client.get(url);
+        for (k, v) in headers {
+            req = req.header(k.as_str(), v.as_str());
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| CoreError::Other(format!("拉 .torrent: {e}")))?;
+        if !resp.status().is_success() {
+            return Err(CoreError::Other(format!("拉 .torrent HTTP {}", resp.status())));
+        }
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| CoreError::Other(format!("读 .torrent: {e}")))?;
+        if bytes.len() > 8 * 1024 * 1024 {
+            return Err(CoreError::Other(".torrent 超过 8MB".into()));
+        }
+        Ok(bytes.to_vec())
     }
 
     pub fn list(&self) -> Result<Vec<TaskInfo>> {
@@ -261,6 +382,14 @@ impl Engine {
                 self.pause(t.id)?;
             }
         }
+        for t in self.list_torrents()? {
+            if matches!(
+                t.state,
+                TorrentState::Active | TorrentState::Seeding | TorrentState::Queued
+            ) {
+                self.pause_torrent(t.id)?;
+            }
+        }
         Ok(())
     }
 
@@ -269,6 +398,14 @@ impl Engine {
             if matches!(t.state, TaskState::Paused | TaskState::Failed) {
                 self.inner.set_state_emit(t.id, TaskState::Queued, "")?;
             }
+        }
+        if self.inner.live.lock().unwrap().p2p {
+            for t in self.list_torrents()? {
+                if matches!(t.state, TorrentState::Paused | TorrentState::Failed) {
+                    self.inner.resume_torrent(t.id)?;
+                }
+            }
+            Inner::kick_bt(self.inner.clone());
         }
         self.inner.clone().schedule();
         Ok(())
@@ -332,8 +469,22 @@ impl Engine {
     pub fn apply_settings(&self, next: EngineSettings) -> Result<EngineSettings> {
         next.validate()?;
         let client = build_client(&self.inner.cfg.user_agent, &next.proxy)?;
+        let prev = self.inner.live.lock().unwrap().clone();
         *self.inner.client.lock().unwrap() = client;
         *self.inner.live.lock().unwrap() = next.clone();
+        if next.p2p && !prev.p2p {
+            bt::boot(self.inner.clone());
+        } else if !next.p2p && prev.p2p {
+            bt::shutdown(self.inner.clone());
+        } else if next.p2p {
+            let rebuild = prev.listen_port != next.listen_port
+                || prev.upnp != next.upnp
+                || prev.proxy != next.proxy;
+            if rebuild {
+                bt::rebuild(self.inner.clone());
+            }
+            Inner::kick_bt(self.inner.clone());
+        }
         Ok(next)
     }
 
@@ -385,7 +536,7 @@ impl Engine {
         Ok(())
     }
 
-    /// 删除任务并从磁盘清掉未完成的 .ddown; delete_file 时连已完成文件一起删.
+    /// 删除任务. delete_file 控制是否清磁盘 (含 .ddown 与成品); 不勾选则只从表移除.
     pub fn remove(&self, id: i64, delete_file: bool) -> Result<()> {
         let info = self.inner.task_info(id)?;
         {
@@ -396,8 +547,8 @@ impl Engine {
             }
         }
         self.inner.store.lock().unwrap().delete_task(id)?;
-        let _ = std::fs::remove_file(info.part_path());
-        if delete_file && info.state == TaskState::Completed {
+        if delete_file {
+            let _ = std::fs::remove_file(info.part_path());
             let _ = std::fs::remove_file(info.final_path());
         }
         self.inner.speeds.lock().unwrap().remove(&id);
@@ -678,6 +829,13 @@ async fn sampler_loop(inner: Arc<Inner>) {
                 })
                 .collect()
         };
+        let (tprog, kick_bt) = inner.sample_torrents();
+        if !tprog.is_empty() {
+            inner.emit_torrent(crate::torrent::TorrentEvent::TorrentProgress { torrents: tprog });
+        }
+        if kick_bt {
+            Inner::kick_bt(inner.clone());
+        }
         if snapshots.is_empty() {
             last.clear();
             continue;
@@ -767,7 +925,7 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn tmp_engine() -> Engine {
+    async fn tmp_engine() -> Engine {
         let n = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -781,12 +939,14 @@ mod tests {
             &seq as *const _
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        Engine::new(EngineConfig::new(dir.join("t.db"), dir.join("dl"))).unwrap()
+        Engine::new(EngineConfig::new(dir.join("t.db"), dir.join("dl")))
+            .await
+            .unwrap()
     }
 
     #[tokio::test]
     async fn import_bytes_writes_completed_file() {
-        let eng = tmp_engine();
+        let eng = tmp_engine().await;
         let task = eng
             .import_bytes(
                 "blob:https://gemini.google.com/abc",
@@ -805,7 +965,7 @@ mod tests {
 
     #[tokio::test]
     async fn import_bytes_fills_ext_from_mime() {
-        let eng = tmp_engine();
+        let eng = tmp_engine().await;
         let task = eng
             .import_bytes(
                 "blob:https://example/x",
@@ -820,7 +980,7 @@ mod tests {
 
     #[tokio::test]
     async fn import_bytes_rejects_over_max() {
-        let eng = tmp_engine();
+        let eng = tmp_engine().await;
         let bytes = vec![0u8; MAX_IMPORT_BYTES + 1];
         let err = eng
             .import_bytes("blob:https://example/x", None, None, &bytes)
@@ -830,7 +990,7 @@ mod tests {
 
     #[tokio::test]
     async fn should_not_add_blob_url() {
-        let eng = tmp_engine();
+        let eng = tmp_engine().await;
         let err = eng.add("blob:https://x/y", AddTaskOptions::default()).unwrap_err();
         assert!(err.to_string().contains("blob"));
     }

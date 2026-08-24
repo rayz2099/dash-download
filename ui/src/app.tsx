@@ -1,11 +1,13 @@
 import type { JSX } from "preact";
 import { useEffect, useMemo, useState } from "preact/hooks";
 import * as api from "./api";
-import type { Boot, TaskInfo } from "./api";
+import type { Boot, TaskInfo, TorrentInfo } from "./api";
 import { MAX_CONN } from "./api";
 import { SettingsPage, updatePhaseText } from "./settings";
+import { NumStep } from "./fields";
+import { FilePickModal, NewTaskPage, ResolveModal, TorrentPane } from "./torrent-ui";
 import {
-  fileType, fmtBytes, fmtEta, fmtSpeed, fmtTime, pct, STATE_META, TYPE_LABEL,
+  FILE_TYPE_ORDER, fileType, fmtBytes, fmtEta, fmtRate, fmtSpeed, fmtTime, pct, STATE_META, TYPE_LABEL,
 } from "./util";
 import type { FileType } from "./util";
 import {
@@ -24,7 +26,7 @@ const SIDE_STATES: { key: Filter; label: string; icon: (p: { size?: number }) =>
   { key: "failed", label: "失败", icon: IcoAlert },
 ];
 
-const FILE_TYPES: FileType[] = ["video", "doc", "archive", "app", "audio", "other"];
+
 
 const lastTry = (t: TaskInfo) => t.completed_at ?? t.created_at;
 const isRunning = (t: TaskInfo) => t.state === "active" || t.state === "probing";
@@ -38,23 +40,76 @@ function initTheme(): string {
 interface CtxMenu {
   x: number;
   y: number;
+  key: string;
+}
+
+type Row = {
+  key: string;
+  kind: "http" | "bt";
   id: number;
+  name: string;
+  dir: string;
+  size: number | null;
+  done: number;
+  speed: number;
+  up_speed: number;
+  peers: number;
+  connecting: number;
+  seen: number;
+  phase: string;
+  state: string;
+  created_at: number;
+  completed_at: number | null;
+  url: string;
+  fileN: number;
+};
+
+function rowsOf(tasks: TaskInfo[], torrents: TorrentInfo[]): Row[] {
+  return [
+    ...tasks.map((t): Row => ({
+      key: "h-" + t.id, kind: "http", id: t.id, name: t.name || t.url, dir: t.dir,
+      size: t.size, done: t.done, speed: t.speed, up_speed: 0, peers: 0, connecting: 0, seen: 0, phase: "",
+      state: t.state, created_at: t.created_at, completed_at: t.completed_at, url: t.url,
+      fileN: 1,
+    })),
+    ...torrents.filter((t) => t.state !== "resolving").map((t): Row => ({
+      key: "b-" + t.id, kind: "bt", id: t.id, name: t.name, dir: t.dir,
+      size: t.size, done: t.done, speed: t.speed, up_speed: t.up_speed, peers: t.peers,
+      connecting: t.connecting || 0, seen: t.seen || 0,
+      phase: t.phase || "", state: t.state,
+      created_at: t.created_at, completed_at: t.completed_at, url: t.source,
+      fileN: t.files.length,
+    })),
+  ];
+}
+
+/// 单文件打开用户下载目录; 多文件 BT 打开种子名那一层.
+function rowFolder(t: Row): string {
+  if (t.kind === "bt" && t.fileN >= 2) return `${t.dir}/${t.name}`;
+  return t.dir;
 }
 
 export function App() {
   const [boot, setBoot] = useState<Boot | null>(null);
   const [bootErr, setBootErr] = useState("");
   const [tasks, setTasks] = useState<TaskInfo[]>([]);
+  const [torrents, setTorrents] = useState<TorrentInfo[]>([]);
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState<number | null>(null);
-  const [progressId, setProgressId] = useState<number | null>(null);
+  const [detail, setDetail] = useState<{ kind: "http" | "bt"; id: number } | null>(null);
   const [menu, setMenu] = useState<CtxMenu | null>(null);
   const [sort, setSort] = useState<{ key: SortKey; asc: boolean }>({ key: "time", asc: false });
   const [showNew, setShowNew] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [theme, setTheme] = useState(initTheme);
-  const [picked, setPicked] = useState<Set<number>>(() => new Set());
+  const [picked, setPicked] = useState<Set<string>>(() => new Set());
+  const [delAsk, setDelAsk] = useState<{ keys: string[]; delFile: boolean } | null>(null);
+  const [pickFiles, setPickFiles] = useState<TorrentInfo | null>(null);
+  const [resolve, setResolve] = useState<{
+    id: number; source: string; name: string; phase: "work" | "fail"; error: string;
+  } | null>(null);
+  const [toast, setToast] = useState("");
   const [paneOn, setPaneOn] = useState(false);
   const [eng, setEng] = useState<api.EngineSettings | null>(null);
 
@@ -62,6 +117,19 @@ export function App() {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem("dd_theme", theme);
   }, [theme]);
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = window.setTimeout(() => setToast(""), 2500);
+    return () => window.clearTimeout(t);
+  }, [toast]);
+
+  const openFile = (path: string) => {
+    api.openPath(path).catch((e) => {
+      const msg = String(e).replace(/^Error: /, "");
+      setToast(msg || "文件不存在");
+    });
+  };
 
   useEffect(() => {
     let dispose: (() => void) | undefined;
@@ -73,13 +141,14 @@ export function App() {
           switch (ev.type) {
             case "snapshot":
               setTasks(ev.tasks);
+              setTorrents(ev.torrents || []);
               break;
             case "task_added":
               setTasks((p) => [ev.task, ...p.filter((t) => t.id !== ev.task.id)]);
               setSelectedId(ev.task.id);
-              setPicked(new Set([ev.task.id]));
+              setPicked(new Set(["h-" + ev.task.id]));
               setMenu(null);
-              setProgressId(ev.task.id);
+              setDetail({ kind: "http", id: ev.task.id });
               setPaneOn(true);
               break;
             case "task_updated":
@@ -88,9 +157,10 @@ export function App() {
             case "task_removed":
               setTasks((p) => p.filter((t) => t.id !== ev.id));
               setPicked((prev) => {
-                if (!prev.has(ev.id)) return prev;
+                const k = "h-" + ev.id;
+                if (!prev.has(k)) return prev;
                 const n = new Set(prev);
-                n.delete(ev.id);
+                n.delete(k);
                 return n;
               });
               break;
@@ -108,6 +178,74 @@ export function App() {
                 }),
               );
               break;
+            case "resolving":
+              setShowNew(false);
+              setResolve({
+                id: ev.torrent.id,
+                source: ev.torrent.source,
+                name: ev.torrent.name,
+                phase: "work",
+                error: "",
+              });
+              break;
+            case "torrent_added":
+              setResolve((cur) => (cur && cur.id === ev.torrent.id ? null : cur));
+              setTorrents((p) => [ev.torrent, ...p.filter((t) => t.id !== ev.torrent.id)]);
+              setPicked(new Set(["b-" + ev.torrent.id]));
+              setSelectedId(ev.torrent.id);
+              setDetail({ kind: "bt", id: ev.torrent.id });
+              setPaneOn(true);
+              setMenu(null);
+              if (ev.torrent.state === "awaiting_selection") setPickFiles(ev.torrent);
+              break;
+            case "torrent_updated":
+              setTorrents((p) => p.map((t) => (t.id === ev.torrent.id ? ev.torrent : t)));
+              if (ev.torrent.state === "awaiting_selection") {
+                setPickFiles((cur) => (cur && cur.id === ev.torrent.id ? ev.torrent : cur || ev.torrent));
+              }
+              if (ev.torrent.state !== "awaiting_selection") {
+                setPickFiles((cur) => (cur && cur.id === ev.torrent.id ? null : cur));
+              }
+              break;
+            case "torrent_removed":
+              setTorrents((p) => p.filter((t) => t.id !== ev.id));
+              setPicked((prev) => {
+                const k = "b-" + ev.id;
+                if (!prev.has(k)) return prev;
+                const n = new Set(prev);
+                n.delete(k);
+                return n;
+              });
+              break;
+            case "torrent_progress":
+              setTorrents((p) =>
+                p.map((t) => {
+                  const pr = ev.torrents.find((x) => x.id === t.id);
+                  if (!pr) return t;
+                  return {
+                    ...t,
+                    done: pr.done,
+                    speed: pr.speed,
+                    up_speed: pr.up_speed,
+                    peers: pr.peers,
+                    connecting: pr.connecting ?? t.connecting,
+                    seen: pr.seen ?? t.seen,
+                    phase: pr.phase || t.phase,
+                    peer_list: pr.peer_list ?? t.peer_list,
+                  };
+                }),
+              );
+              break;
+            case "resolve_failed":
+              setShowNew(false);
+              setResolve({
+                id: ev.id,
+                source: ev.source,
+                name: "",
+                phase: "fail",
+                error: ev.error,
+              });
+              break;
           }
         });
       })
@@ -120,14 +258,19 @@ export function App() {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       if (menu) { setMenu(null); return; }
+      if (resolve) {
+        if (resolve.phase === "work") api.removeTorrent(resolve.id, false).catch(() => {});
+        setResolve(null);
+        return;
+      }
       if (showNew) { setShowNew(false); return; }
       if (showSettings) { setShowSettings(false); return; }
       if (paneOn) { setPaneOn(false); return; }
-      if (progressId != null) setProgressId(null);
+      if (detail != null) setDetail(null);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [menu, showNew, showSettings, paneOn, progressId]);
+  }, [menu, resolve, showNew, showSettings, paneOn, detail]);
 
   useEffect(() => {
     if (!menu) return;
@@ -146,11 +289,18 @@ export function App() {
     };
   }, [menu]);
 
+  const allRows = useMemo(() => rowsOf(tasks, torrents), [tasks, torrents]);
   const visible = useMemo(() => {
-    let list = tasks;
-    if (filter === "active") list = list.filter((t) => ["active", "probing", "paused"].includes(t.state));
-    else if (filter.startsWith("type:")) list = list.filter((t) => fileType(t.name) === filter.slice(5));
-    else if (filter !== "all") list = list.filter((t) => t.state === filter);
+    let list = allRows;
+    if (filter === "active") {
+      list = list.filter((t) => ["active", "probing", "paused", "resolving", "seeding"].includes(t.state));
+    } else if (filter === "completed") {
+      list = list.filter((t) => t.state === "completed" || t.state === "seeding");
+    } else if (filter.startsWith("type:")) {
+      list = list.filter((t) => fileType(t.name) === filter.slice(5));
+    } else if (filter !== "all") {
+      list = list.filter((t) => t.state === filter);
+    }
     if (query) list = list.filter((t) => t.name.toLowerCase().includes(query.toLowerCase()));
     const dir = sort.asc ? 1 : -1;
     return [...list].sort((a, b) => {
@@ -160,48 +310,52 @@ export function App() {
         case "state": return dir * a.state.localeCompare(b.state);
         case "speed": return dir * (a.speed - b.speed);
         case "created": return dir * (a.created_at - b.created_at);
-        default: return dir * (lastTry(a) - lastTry(b));
+        default: return dir * ((a.completed_at ?? a.created_at) - (b.completed_at ?? b.created_at));
       }
     });
-  }, [tasks, filter, query, sort]);
+  }, [allRows, filter, query, sort]);
 
-  const globalSpeed = tasks.reduce((a, t) => a + (t.state === "active" ? t.speed : 0), 0);
-  const selected = tasks.find((t) => t.id === selectedId) || null;
-  const menuTask = menu ? tasks.find((t) => t.id === menu.id) || null : null;
-  const hasActive = tasks.some(isRunning);
+  const globalSpeed = allRows.reduce((a, t) => a + (t.state === "active" || t.state === "seeding" ? t.speed : 0), 0);
+  const selected = visible.find((t) => t.id === selectedId && picked.has(t.key)) || visible.find((t) => t.key === [...picked][0]) || null;
+  const httpDetail = detail?.kind === "http" ? tasks.find((t) => t.id === detail.id) : undefined;
+  const btDetail = detail?.kind === "bt" ? torrents.find((t) => t.id === detail.id) : undefined;
+  const menuRow = menu ? allRows.find((t) => t.key === menu.key) || null : null;
+  const hasActive = tasks.some((t) => isRunning(t) || t.state === "queued")
+    || torrents.some((t) => t.state === "active" || t.state === "queued" || t.state === "seeding");
 
-  const toggleTask = (t: TaskInfo) => {
-    const op = isRunning(t) || t.state === "queued" ? api.pauseTask(t.id) : api.resumeTask(t.id);
+  const toggleRow = (r: Row) => {
+    const running = r.kind === "bt"
+      ? ["active", "queued", "resolving", "seeding"].includes(r.state)
+      : ["active", "probing", "queued"].includes(r.state);
+    const op = r.kind === "bt"
+      ? (running ? api.pauseTorrent(r.id) : api.resumeTorrent(r.id))
+      : (running ? api.pauseTask(r.id) : api.resumeTask(r.id));
     op.catch(console.error);
   };
 
-  // 工具栏批量操作只吃勾选集合, 不回退 selectedId, 避免未勾选时误删焦点行.
-  const pickIds = () => [...picked];
-
-  // 打开只对勾选里已完成的任务发 openPath, 未完成没有可打开的落盘文件.
-  const removeMany = (ids: number[]) => {
-    if (!ids.length) return;
-    Promise.all(ids.map((id) => api.removeTask(id, true)))
+  const removeMany = (keys: string[], delFile: boolean) => {
+    if (!keys.length) return;
+    Promise.all(keys.map((k) => {
+      const id = Number(k.slice(2));
+      return k.startsWith("b-") ? api.removeTorrent(id, delFile) : api.removeTask(id, delFile);
+    }))
       .then(() => {
         setPicked(new Set());
-        if (progressId != null && ids.includes(progressId)) {
-          setPaneOn(false);
-          setProgressId(null);
-        }
-        if (selectedId != null && ids.includes(selectedId)) setSelectedId(null);
+        setDelAsk(null);
       })
       .catch(console.error);
   };
 
-  const onRowClick = (t: TaskInfo, e: MouseEvent) => {
-    const ids = visible.map((x) => x.id);
-    if (e.shiftKey && selectedId != null) {
-      const a = ids.indexOf(selectedId);
-      const b = ids.indexOf(t.id);
+  const onRowClick = (t: Row, e: MouseEvent) => {
+    const keys = visible.map((x) => x.key);
+    if (e.shiftKey && picked.size) {
+      const last = [...picked][picked.size - 1];
+      const a = keys.indexOf(last);
+      const b = keys.indexOf(t.key);
       if (a >= 0 && b >= 0) {
-        setPicked(new Set(ids.slice(Math.min(a, b), Math.max(a, b) + 1)));
+        setPicked(new Set(keys.slice(Math.min(a, b), Math.max(a, b) + 1)));
         setSelectedId(t.id);
-        setProgressId(t.id);
+        setDetail({ kind: t.kind, id: t.id });
         setPaneOn(true);
         return;
       }
@@ -209,19 +363,23 @@ export function App() {
     if (e.metaKey || e.ctrlKey) {
       setPicked((prev) => {
         const n = new Set(prev);
-        if (n.has(t.id)) n.delete(t.id); else n.add(t.id);
+        if (n.has(t.key)) n.delete(t.key); else n.add(t.key);
         return n;
       });
       setSelectedId(t.id);
       return;
     }
-    setPicked(new Set([t.id]));
+    setPicked(new Set([t.key]));
     setSelectedId(t.id);
-    setProgressId(t.id);
+    setDetail({ kind: t.kind, id: t.id });
     setPaneOn(true);
+    if (t.kind === "bt" && t.state === "awaiting_selection") {
+      const tr = torrents.find((x) => x.id === t.id);
+      if (tr) setPickFiles(tr);
+    }
   };
 
-  const visIds = visible.map((x) => x.id);
+  const visIds = visible.map((x) => x.key);
   const pickN = visIds.filter((id) => picked.has(id)).length;
   const allOn = visIds.length > 0 && pickN === visIds.length;
   const mid = pickN > 0 && !allOn;
@@ -258,10 +416,12 @@ export function App() {
           <div class="side-title">下载</div>
           {SIDE_STATES.map((s) => {
             const count = s.key === "all"
-              ? tasks.length
+              ? allRows.length
               : s.key === "active"
-                ? tasks.filter((t) => ["active", "probing", "paused"].includes(t.state)).length
-                : tasks.filter((t) => t.state === s.key).length;
+                ? allRows.filter((t) => ["active", "probing", "paused", "resolving", "seeding"].includes(t.state)).length
+                : s.key === "completed"
+                  ? allRows.filter((t) => t.state === "completed" || t.state === "seeding").length
+                  : allRows.filter((t) => t.state === s.key).length;
             return (
               <div class={"side-item" + (!showSettings && !showNew && filter === s.key ? " on" : "")}
                 onClick={() => { setShowSettings(false); setShowNew(false); setFilter(s.key); }}>
@@ -274,8 +434,8 @@ export function App() {
         </div>
         <div class="side-group">
           <div class="side-title">分类</div>
-          {FILE_TYPES.map((ft) => {
-            const count = tasks.filter((t) => fileType(t.name) === ft).length;
+          {FILE_TYPE_ORDER.map((ft) => {
+            const count = allRows.filter((t) => fileType(t.name) === ft).length;
             return (
               <div class={"side-item" + (!showSettings && !showNew && filter === `type:${ft}` ? " on" : "")}
                 onClick={() => { setShowSettings(false); setShowNew(false); setFilter(`type:${ft}` as Filter); }}>
@@ -310,10 +470,23 @@ export function App() {
         }} />
       ) : showNew && boot && eng ? (
         <NewTaskPage defaultDir={eng.default_dir} defaultConn={eng.max_segments} onClose={() => setShowNew(false)}
-          onCreated={(id) => { setShowNew(false); setMenu(null); setSelectedId(id); setPicked(new Set([id])); setProgressId(id); setPaneOn(true); }} />
+          onCreated={(t) => {
+            setShowNew(false);
+            setMenu(null);
+            if (!t) return;
+            if (t.state === "resolving") {
+              setResolve({ id: t.id, source: t.source, name: t.name, phase: "work", error: "" });
+            }
+            if (t.state === "awaiting_selection") setPickFiles(t);
+          }} />
       ) : (
         <div class="workspace">
           <div class="main">
+            {toast && (
+              <div class="update-bar" style={{ color: "var(--red)" }} onClick={() => setToast("")}>
+                {toast}
+              </div>
+            )}
             <UpdateBar />
             <div class="page-head">
               <div>
@@ -335,20 +508,16 @@ export function App() {
               <button class="btn primary" onClick={() => { setShowNew(true); setShowSettings(false); setMenu(null); }}>
                 <IcoPlus size={16} /> 新建下载
               </button>
-              <button class="btn" disabled={!selected || selected.state === "completed" || isRunning(selected) || selected.state === "queued"}
-                onClick={() => selected && api.resumeTask(selected.id).catch(console.error)}>
+              <button class="btn" disabled={!selected || ["completed", "active", "probing", "queued", "resolving", "seeding"].includes(selected.state)}
+                onClick={() => selected && toggleRow(selected)}>
                 <IcoPlay size={16} /> 继续
               </button>
-              <button class="btn" disabled={!selected || !(isRunning(selected) || selected.state === "queued")}
-                onClick={() => selected && api.pauseTask(selected.id).catch(console.error)}>
+              <button class="btn" disabled={!selected || !["active", "probing", "queued", "resolving", "seeding"].includes(selected.state)}
+                onClick={() => selected && toggleRow(selected)}>
                 <IcoPause size={16} /> 暂停
               </button>
               <button class="btn danger" disabled={picked.size === 0}
-                onClick={() => {
-                  const n = picked.size;
-                  if (!confirm(`删除 ${n} 个任务? 已完成文件也会从磁盘删除.`)) return;
-                  removeMany(pickIds());
-                }}>
+                onClick={() => setDelAsk({ keys: [...picked], delFile: true })}>
                 <IcoTrash size={16} /> 删除
               </button>
               <div class="spacer"></div>
@@ -386,50 +555,110 @@ export function App() {
                 </div>
               ) : (
                 visible.map((t) => (
-                  <TaskRow key={t.id} t={t} selected={picked.has(t.id)}
+                  <TaskRow key={t.key} t={t} selected={picked.has(t.key)}
                     onSelect={(e) => onRowClick(t, e)}
                     onTogglePick={() => {
                       setPicked((prev) => {
                         const n = new Set(prev);
-                        if (n.has(t.id)) n.delete(t.id); else n.add(t.id);
+                        if (n.has(t.key)) n.delete(t.key); else n.add(t.key);
                         return n;
                       });
                       setSelectedId(t.id);
                     }}
-                    onOpenDetail={() => { setSelectedId(t.id); setMenu(null); setProgressId(t.id); setPaneOn(true); }}
-                    onOpenFile={() => api.openPath(`${t.dir}/${t.name}`)}
-                    onMenu={(x, y) => { setSelectedId(t.id); setPicked(new Set([t.id])); setMenu({ x, y, id: t.id }); }} />
+                    onOpenDetail={() => {
+                      setSelectedId(t.id); setMenu(null);
+                      setDetail({ kind: t.kind, id: t.id });
+                      setPaneOn(true);
+                      if (t.kind === "bt" && t.state === "awaiting_selection") {
+                        const tr = torrents.find((x) => x.id === t.id);
+                        if (tr) setPickFiles(tr);
+                      }
+                    }}
+                    onOpenFile={() => openFile(`${t.dir}/${t.name}`)}
+                    onMenu={(x, y) => { setSelectedId(t.id); setPicked(new Set([t.key])); setMenu({ x, y, key: t.key }); }} />
                 ))
               )}
             </div>
           </div>
 
-          {progressId != null && tasks.find((t) => t.id === progressId) && (
+          {httpDetail && (
             <DetailPane
-              t={tasks.find((t) => t.id === progressId)!}
+              t={httpDetail}
               collapsed={!paneOn}
-              onToggle={() => toggleTask(tasks.find((t) => t.id === progressId)!)}
-              onCancel={() => {
-                const id = progressId;
-                api.cancelTask(id).catch(console.error);
+              onToggle={() => {
+                const op = isRunning(httpDetail) || httpDetail.state === "queued"
+                  ? api.pauseTask(httpDetail.id) : api.resumeTask(httpDetail.id);
+                op.catch(console.error);
               }}
+              onCancel={() => { api.cancelTask(httpDetail.id).catch(console.error); }}
+              onHide={() => { setMenu(null); setPaneOn(false); }}
+            />
+          )}
+          {btDetail && (
+            <TorrentPane
+              t={btDetail}
+              collapsed={!paneOn}
+              onToggle={() => {
+                const running = btDetail.state === "active" || btDetail.state === "seeding"
+                  || btDetail.state === "queued";
+                const op = running ? api.pauseTorrent(btDetail.id) : api.resumeTorrent(btDetail.id);
+                op.catch(console.error);
+              }}
+              onPickFiles={() => setPickFiles(btDetail)}
               onHide={() => { setMenu(null); setPaneOn(false); }}
             />
           )}
         </div>
       )}
 
-      {menu && menuTask && !showNew && !showSettings && (
-        <ContextMenu menu={menu} t={menuTask}
+      {menu && menuRow && !showNew && !showSettings && (
+        <ContextMenu menu={menu} t={menuRow}
           onClose={() => setMenu(null)}
-          onDetail={() => { setMenu(null); setProgressId(menuTask.id); setPaneOn(true); }} />
+          onOpenFile={() => openFile(`${menuRow.dir}/${menuRow.name}`)}
+          onDetail={() => {
+            setMenu(null);
+            setDetail({ kind: menuRow.kind, id: menuRow.id });
+            setPaneOn(true);
+          }}
+          onDelete={() => setDelAsk({ keys: [menuRow.key], delFile: true })} />
+      )}
+
+      {delAsk && (
+        <div class="overlay" onClick={() => setDelAsk(null)}>
+          <div class="modal" onClick={(e) => e.stopPropagation()}>
+            <h2 class="page-title" style={{ fontSize: 16 }}>删除 {delAsk.keys.length} 项?</h2>
+            <label class="settings-hint" style={{ display: "flex", gap: 8, alignItems: "center", margin: "12px 0" }}>
+              <input type="checkbox" checked={delAsk.delFile}
+                onChange={(e) => setDelAsk({ ...delAsk, delFile: (e.target as HTMLInputElement).checked })} />
+              删除本地文件
+            </label>
+            <div class="modal-foot">
+              <button class="btn" onClick={() => setDelAsk(null)}>取消</button>
+              <button class="btn danger" onClick={() => removeMany(delAsk.keys, delAsk.delFile)}>删除</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {resolve && (
+        <ResolveModal
+          info={resolve}
+          onClose={() => {
+            if (resolve.phase === "work") api.removeTorrent(resolve.id, false).catch(() => {});
+            setResolve(null);
+          }}
+        />
+      )}
+
+      {pickFiles && (
+        <FilePickModal t={pickFiles} onClose={() => setPickFiles(null)} />
       )}
     </div>
   );
 }
 
 function TaskRow(props: {
-  t: TaskInfo; selected: boolean;
+  t: Row; selected: boolean;
   onSelect: (e: MouseEvent) => void;
   onTogglePick: () => void;
   onOpenDetail: () => void;
@@ -437,13 +666,29 @@ function TaskRow(props: {
   onMenu: (x: number, y: number) => void;
 }) {
   const { t } = props;
-  const p = pct(t);
-  const statusCell = t.state === "failed" || t.state === "queued" || t.state === "canceled"
-    ? STATE_META[t.state].label
-    : `${Math.floor(p * 100)}%`;
+  const p = t.size ? t.done / t.size : 0;
+  const meta = STATE_META[t.state] || { label: t.state, cls: "" };
+  const checking = t.kind === "bt" && t.phase === "initializing";
+  const statusCell = checking
+    ? "校验中"
+    : ["failed", "queued", "canceled", "resolving", "awaiting_selection", "seeding"].includes(t.state)
+      ? meta.label
+      : `${Math.floor(p * 100)}%`;
+  const showProg = t.kind === "bt" && t.state !== "awaiting_selection"
+    && (checking || ["active", "paused", "queued", "seeding", "failed"].includes(t.state));
+  const progMeta = checking
+    ? `${fmtBytes(t.done)}${t.size ? " / " + fmtBytes(t.size) : ""} · 校验本地文件`
+    : [
+        t.size != null ? `${fmtBytes(t.done)} / ${fmtBytes(t.size)}` : fmtBytes(t.done),
+        fmtRate(t.speed),
+        t.kind === "bt"
+          ? `${t.peers} 已连接${t.connecting ? ` · ${t.connecting} 连接中` : ""}${!t.peers && t.seen ? ` · ${t.seen} 已知` : ""}`
+          : "",
+        t.up_speed > 0 ? "↑ " + fmtRate(t.up_speed) : "",
+      ].filter(Boolean).join(" · ");
 
   const onDblClick = () => {
-    if (t.state === "completed") props.onOpenFile();
+    if (t.state === "completed" || t.state === "seeding") props.onOpenFile();
     else props.onOpenDetail();
   };
 
@@ -460,49 +705,61 @@ function TaskRow(props: {
       </div>
       <div class="cell-name">
         <span class="mini-ico"><TypeIcon type={fileType(t.name)} size={16} /></span>
-        <span class="nm">{t.name || t.url}</span>
-        {t.state === "completed" && (
-          <button type="button" class="row-open" title="打开"
-            onClick={(e) => { e.stopPropagation(); props.onOpenFile(); }}>
-            <IcoOpen size={14} />
-          </button>
-        )}
+        <div class="nm-wrap">
+          <div class="nm-line">
+            <span class="nm">{t.name || t.url}</span>
+            {t.kind === "bt" && <span class="bt-tag">BT</span>}
+            {(t.state === "completed" || t.state === "seeding") && (
+              <button type="button" class="row-open" title="打开"
+                onClick={(e) => { e.stopPropagation(); props.onOpenFile(); }}>
+                <IcoOpen size={14} />
+              </button>
+            )}
+          </div>
+          {showProg && (
+            <div class="nm-prog">
+              <div class="nm-prog-bar"><div style={{ width: `${Math.min(100, p * 100).toFixed(1)}%` }}></div></div>
+              <span class="nm-prog-meta">{progMeta}</span>
+            </div>
+          )}
+        </div>
       </div>
       <div class="num">{t.size ? fmtBytes(t.size) : t.state === "completed" ? fmtBytes(t.done) : "—"}</div>
       <div class="num">{statusCell}</div>
       <div class="num">{fmtTime(t.created_at)}</div>
-      <div class="num">{fmtTime(lastTry(t))}</div>
+      <div class="num">{fmtTime(t.completed_at ?? t.created_at)}</div>
     </div>
   );
 }
 
 function ContextMenu(props: {
-  menu: CtxMenu; t: TaskInfo;
+  menu: CtxMenu; t: Row;
   onClose: () => void;
+  onOpenFile: () => void;
   onDetail: () => void;
+  onDelete: () => void;
 }) {
   const { t } = props;
-  const running = isRunning(t) || t.state === "queued";
-  const filePath = `${t.dir}/${t.name}`;
+  const running = ["active", "probing", "resolving", "queued", "seeding"].includes(t.state);
+  const pause = () => (t.kind === "bt" ? api.pauseTorrent(t.id) : api.pauseTask(t.id)).catch(console.error);
+  const resume = () => (t.kind === "bt" ? api.resumeTorrent(t.id) : api.resumeTask(t.id)).catch(console.error);
   const item = (label: string, action: () => void, cls = "") => (
     <div class={"ctx-item " + cls} onClick={() => { props.onClose(); action(); }}>{label}</div>
   );
   return (
     <div class="ctx-menu" style={{ left: props.menu.x, top: props.menu.y }}>
-      {t.state !== "completed" && (running
-        ? item("暂停", () => api.pauseTask(t.id).catch(console.error))
-        : item("继续", () => api.resumeTask(t.id).catch(console.error)))}
-      {item("重新下载", () => api.redownloadTask(t.id).catch(console.error))}
+      {t.state !== "completed" && (running ? item("暂停", pause) : item("继续", resume))}
+      {t.kind === "http" && item("重新下载", () => api.redownloadTask(t.id).catch(console.error))}
       <div class="ctx-sep"></div>
-      {t.state === "completed" && item("打开", () => api.openPath(filePath))}
-      {t.state === "completed" && item("打开所在文件夹", () => api.revealFile(filePath))}
+      {item("打开文件夹", () => api.openPath(rowFolder(t), t.dir))}
+      {(t.state === "completed" || t.state === "seeding") && item("打开", props.onOpenFile)}
       {item("复制链接地址", () => navigator.clipboard.writeText(t.url))}
       {item("进度", props.onDetail)}
-      {t.state !== "completed" && t.state !== "canceled" && (
+      {t.kind === "http" && t.state !== "completed" && t.state !== "canceled" && (
         item("取消", () => api.cancelTask(t.id).catch(console.error))
       )}
       <div class="ctx-sep"></div>
-      {item("删除", () => api.removeTask(t.id, true).catch(console.error), "danger")}
+      {item("删除", props.onDelete, "danger")}
     </div>
   );
 }
@@ -568,11 +825,8 @@ function DetailPane(props: { t: TaskInfo; collapsed: boolean; onToggle: () => vo
               <div class="kv-line">
                 <span class="k">Connections</span>
                 <span class="v">
-                  <div class="stepper">
-                    <button onClick={() => api.setConnections(t.id, Math.max(1, conn - 1)).catch(console.error)}>−</button>
-                    <b>{conn}</b>
-                    <button onClick={() => api.setConnections(t.id, Math.min(MAX_CONN, conn + 1)).catch(console.error)}>+</button>
-                  </div>
+                  <NumStep value={conn} min={1} max={MAX_CONN}
+                    onChange={(n) => api.setConnections(t.id, n).catch(console.error)} />
                 </span>
               </div>
               <div class="settings-hint">
@@ -608,120 +862,6 @@ function DetailPane(props: { t: TaskInfo; collapsed: boolean; onToggle: () => vo
         </div>
       </div>
     </aside>
-  );
-}
-
-function NewTaskPage(props: { defaultDir: string; defaultConn: number; onClose: () => void; onCreated: (id: number) => void }) {
-  const [url, setUrl] = useState("");
-  const [dir, setDir] = useState(props.defaultDir);
-  const [conn, setConn] = useState(props.defaultConn);
-  const [showAdv, setShowAdv] = useState(false);
-  const [headers, setHeaders] = useState("");
-  const [err, setErr] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  // NDM 的 New URL 会自动读剪贴板: 打开弹窗时若剪贴板是 URL 则预填
-  useEffect(() => {
-    navigator.clipboard.readText()
-      .then((text) => {
-        if (/^https?:\/\/\S+$/i.test(text.trim())) setUrl(text.trim());
-      })
-      .catch(() => { /* 无剪贴板权限时忽略 */ });
-  }, []);
-
-  const urls = url.split("\n").map((s) => s.trim()).filter((s) => /^https?:\/\//i.test(s));
-  const previewName = useMemo(() => {
-    if (!urls.length) return "";
-    try {
-      const path = new URL(urls[0]).pathname;
-      return decodeURIComponent(path.split("/").filter(Boolean).pop() || "") || "由服务器决定";
-    } catch {
-      return "";
-    }
-  }, [url]);
-
-  const parseHeaders = (): [string, string][] =>
-    headers.split("\n").map((l) => {
-      const i = l.indexOf(":");
-      return i > 0 ? [l.slice(0, i).trim(), l.slice(i + 1).trim()] as [string, string] : null;
-    }).filter((x): x is [string, string] => !!x && !!x[0] && !!x[1]);
-
-  const create = async (queueOnly: boolean) => {
-    setBusy(true);
-    setErr("");
-    try {
-      let firstId = 0;
-      for (const u of urls) {
-        const t = await api.addTask({
-          url: u, dir, segments: conn, queue_only: queueOnly, headers: parseHeaders(),
-        });
-        if (!firstId) firstId = t.id;
-      }
-      props.onCreated(firstId);
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div class="page">
-      <div class="page-inner">
-        <h1 class="page-title">新建下载</h1>
-        <p class="page-sub">粘贴 http/https 链接, 支持多行批量.</p>
-        <div class="field">
-          <label>下载链接</label>
-          <textarea rows={4} autofocus placeholder="https://…" value={url}
-            onInput={(e) => setUrl((e.target as HTMLTextAreaElement).value)} />
-        </div>
-        {previewName && (
-          <div class="file-preview">
-            <TypeIcon type={fileType(previewName)} size={15} />
-            <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              {previewName}{urls.length > 1 ? ` 等 ${urls.length} 个文件` : ""}
-            </span>
-            <span style={{ color: "var(--text-3)", fontSize: 11 }}>大小待探测</span>
-          </div>
-        )}
-        <div class="field-row">
-          <div class="field">
-            <label>保存到</label>
-            <input type="text" value={dir} onInput={(e) => setDir((e.target as HTMLInputElement).value)} />
-          </div>
-          <div class="field">
-            <label>连接数</label>
-            <div class="stepper">
-              <button onClick={() => setConn(Math.max(1, conn - 1))}>−</button>
-              <b>{conn}</b>
-              <button onClick={() => setConn(Math.min(MAX_CONN, conn + 1))}>+</button>
-            </div>
-          </div>
-        </div>
-        <div>
-          <button class="btn" style={{ border: "none", padding: 0, height: "auto", color: "var(--text-2)", fontSize: 12 }}
-            onClick={() => setShowAdv(!showAdv)}>
-            {showAdv ? "隐藏高级选项" : "高级选项…"}
-          </button>
-          {showAdv && (
-            <div class="field" style={{ marginTop: 10 }}>
-              <label>自定义 Header (每行一条, 如 Cookie: xxx)</label>
-              <textarea rows={3} value={headers}
-                placeholder={"Referer: https://example.com\nCookie: session=…"}
-                onInput={(e) => setHeaders((e.target as HTMLTextAreaElement).value)} />
-            </div>
-          )}
-        </div>
-        {err && <div class="detail-err">{err}</div>}
-        <div class="modal-foot">
-          <button class="btn" onClick={props.onClose}>返回</button>
-          <button class="btn" disabled={!urls.length || busy} onClick={() => create(true)}>加入队列</button>
-          <button class="btn primary" disabled={!urls.length || busy} onClick={() => create(false)}>
-            <IcoDown size={16} /> 开始下载
-          </button>
-        </div>
-      </div>
-    </div>
   );
 }
 

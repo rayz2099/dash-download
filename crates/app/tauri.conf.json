@@ -1,22 +1,31 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Dash Download",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "identifier": "dev.ray.dash-download",
   "build": {
     "frontendDist": "../../ui/dist",
     "devUrl": "http://localhost:5173",
-    "beforeDevCommand": "pnpm run dev:ui",
-    "beforeBuildCommand": "pnpm run build:ui"
+    "beforeDevCommand": {
+      "script": "pnpm --dir ui dev",
+      "cwd": "../.."
+    },
+    "beforeBuildCommand": {
+      "script": "pnpm --dir ui build",
+      "cwd": "../.."
+    }
   },
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "Dash Download",
         "width": 1180,
         "height": 760,
         "minWidth": 900,
-        "minHeight": 560
+        "minHeight": 560,
+        "visible": true,
+        "focus": true
       }
     ],
     "security": {

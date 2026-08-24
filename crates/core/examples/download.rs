@@ -9,7 +9,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dir = std::env::args().nth(2).unwrap_or_else(|| "/tmp/dd-test".to_string());
 
     let cfg = EngineConfig::new("/tmp/dd-test/dd.sqlite".into(), dir.clone().into());
-    let engine = Engine::new(cfg)?;
+    let engine = Engine::new(cfg).await?;
     let mut events = engine.subscribe();
 
     let task = engine.add(&url, AddTaskOptions::default())?;

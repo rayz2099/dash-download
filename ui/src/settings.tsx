@@ -3,7 +3,7 @@ import * as api from "./api";
 import type { Boot, EngineSettings, ProxyCfg, ProxyKind, ProxyProbe, UpdateStatus } from "./api";
 import { MAX_CONN } from "./api";
 import { fmtBytes } from "./util";
-import { IcoFolder } from "./icons";
+import { DirPick, NumStep } from "./fields";
 import { applyCheck, armFlash } from "./update-check";
 
 /** 探测默认打 Google, 因为多数代理场景就是为了出网. */
@@ -98,7 +98,7 @@ function UpdateLog(props: { up: UpdateStatus; ver: string }) {
   );
 }
 
-type Tab = "general" | "proxy" | "update";
+type Tab = "general" | "p2p" | "proxy" | "update";
 
 /** 设置页做成右侧内嵌导航, 避免跟任务表抢同一套 toolbar. */
 export function SettingsPage(props: {
@@ -232,6 +232,7 @@ export function SettingsPage(props: {
         <div class="settings-rail-title">设置</div>
         {([
           ["general", "通用"],
+          ["p2p", "P2P"],
           ["proxy", "代理"],
           ["update", "更新"],
         ] as [Tab, string][]).map(([k, label]) => (
@@ -250,20 +251,10 @@ export function SettingsPage(props: {
                 <div class="settings-row">
                   <div>
                     <div class="settings-label">默认下载目录</div>
-                    <div class="settings-hint">未改时用系统 Downloads. 点右侧选文件夹, 不手填路径</div>
+                    <div class="settings-hint">未改时用系统 Downloads. 可浏览或手填路径</div>
                   </div>
                 </div>
-                <div class="dir-pick">
-                  <span class="dir-pick-path" title={eng.default_dir}>{eng.default_dir}</span>
-                  <button type="button" class="btn" onClick={() => {
-                    api.pickDir(eng.default_dir).then((dir) => {
-                      if (!dir || dir === props.eng.default_dir) return;
-                      persist({ ...props.eng, default_dir: dir });
-                    });
-                  }}>
-                    <IcoFolder size={15} /> 选择
-                  </button>
-                </div>
+                <DirPick value={eng.default_dir} onChange={(dir) => persist({ ...props.eng, default_dir: dir })} />
                 <div class="settings-row">
                   <div>
                     <div class="settings-label">同时下载</div>
@@ -291,6 +282,74 @@ export function SettingsPage(props: {
                       api.setAutoStart(next).then(setAutoStart);
                     }} />
                 </div>
+              </div>
+            </>
+          )}
+
+          {tab === "p2p" && (
+            <>
+              <h1 class="page-title">P2P 网络</h1>
+              <p class="page-sub">默认关闭. 打开后才会监听端口、连 DHT / Tracker.</p>
+              <div class="settings-card">
+                <div class="settings-row">
+                  <div>
+                    <div class="settings-label">启用 P2P</div>
+                    <div class="settings-hint">打开即监听 / DHT. 解析磁力可走 HTTP 缓存, 关着不对外</div>
+                  </div>
+                  <button class={"toggle" + (eng.p2p ? " on" : "")}
+                    onClick={() => persist({ ...props.eng, p2p: !eng.p2p })} />
+                </div>
+                <div class="settings-row">
+                  <div>
+                    <div class="settings-label">同时下载</div>
+                    <div class="settings-hint">只计正在拉数据的种子, 做种不占坑</div>
+                  </div>
+                  <NumStep value={eng.max_bt_active || 3} min={1} max={MAX_CONN}
+                    onChange={(n) => persist({ ...props.eng, max_bt_active: n })} />
+                </div>
+                <div class="settings-row">
+                  <div>
+                    <div class="settings-label">做种上限</div>
+                    <div class="settings-hint">超出后暂停多余做种的上传</div>
+                  </div>
+                  <NumStep value={eng.max_bt_seed || 10} min={1} max={MAX_CONN}
+                    onChange={(n) => persist({ ...props.eng, max_bt_seed: n })} />
+                </div>
+                <div class="settings-row">
+                  <div>
+                    <div class="settings-label">入站端口</div>
+                    <div class="settings-hint">改端口需重启 app. 当前 {eng.listen_port || "自动"}</div>
+                  </div>
+                  <NumStep value={eng.listen_port || 0} min={0} max={65535}
+                    onChange={(n) => persist({ ...props.eng, listen_port: n })} />
+                </div>
+                <label class="settings-row">
+                  <div>
+                    <div class="settings-label">UPnP</div>
+                    <div class="settings-hint">给路由器映射入站端口, 加速 Peer 接入</div>
+                  </div>
+                  <input type="checkbox" checked={eng.upnp !== false}
+                    onChange={(e) => persist({ ...props.eng, upnp: (e.target as HTMLInputElement).checked })} />
+                </label>
+                <label class="settings-row">
+                  <div>
+                    <div class="settings-label">附加公共 Tracker</div>
+                    <div class="settings-hint">下载/做种附加 XIU2/ngosang. 磁力解析仍会注入; private=1 永不附加</div>
+                  </div>
+                  <input type="checkbox" checked={!!eng.extra_trackers}
+                    onChange={(e) => persist({ ...props.eng, extra_trackers: (e.target as HTMLInputElement).checked })} />
+                </label>
+                <div class="settings-row">
+                  <div>
+                    <div class="settings-label">磁力解析超时</div>
+                    <div class="settings-hint">HTTP 缓存 + DHT 共用. 超时即失败, 不进下载列表</div>
+                  </div>
+                  <NumStep value={eng.resolve_secs || 30} min={5} max={300}
+                    onChange={(n) => persist({ ...props.eng, resolve_secs: n })} />
+                </div>
+                {eng.bt_direct && (
+                  <div class="settings-hint">当前是 HTTP 代理, BT 已直连 (DHT/uTP 走不了 HTTP CONNECT)</div>
+                )}
               </div>
             </>
           )}
@@ -458,13 +517,4 @@ export function SettingsPage(props: {
   );
 }
 
-function NumStep(props: { value: number; min: number; max: number; onChange: (n: number) => void }) {
-  const { value, min, max, onChange } = props;
-  return (
-    <div class="stepper">
-      <button type="button" disabled={value <= min} onClick={() => onChange(value - 1)}>−</button>
-      <b>{value}</b>
-      <button type="button" disabled={value >= max} onClick={() => onChange(value + 1)}>+</button>
-    </div>
-  );
-}
+

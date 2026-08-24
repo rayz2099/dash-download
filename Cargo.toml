@@ -1,9 +1,10 @@
 [workspace]
 resolver = "2"
 members = ["crates/core", "crates/app"]
+exclude = ["vendor/librqbit"]
 
 [workspace.package]
-version = "1.1.0"
+version = "1.2.0"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -23,3 +24,7 @@ rand = "0.8"
 [profile.release]
 lto = "thin"
 strip = true
+
+# handshake 循环读 + TCP_NODELAY. 上游 9.0.1 单次 read 会把拆包握手打成 0 live.
+[patch.crates-io]
+librqbit = { path = "vendor/librqbit" }

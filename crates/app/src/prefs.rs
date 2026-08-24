@@ -2,30 +2,24 @@
 //! 与 Task sqlite 分开, 避免引擎 schema 被桌面壳字段污染.
 //! Store 是唯一写入口, 防止 updater 与设置 API 各自持有一份过期快照互相覆盖.
 
-use dd_core::{EngineSettings, ProxyCfg};
+use dd_core::EngineSettings;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+/// 壳字段 + 引擎快照. flatten 保持旧 prefs.json 扁平形状, 不再抄 EngineSettings 字段.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Prefs {
+    #[serde(default = "def_true")]
     pub auto_update: bool,
+    #[serde(default = "def_true")]
     pub auto_start: bool,
-    #[serde(default)]
-    pub default_dir: String,
-    #[serde(default = "def_conc")]
-    pub max_concurrent: u32,
-    #[serde(default = "def_seg")]
-    pub max_segments: u32,
-    #[serde(default)]
-    pub proxy: ProxyCfg,
+    #[serde(flatten)]
+    pub engine: EngineSettings,
 }
 
-fn def_conc() -> u32 {
-    3
-}
-fn def_seg() -> u32 {
-    8
+fn def_true() -> bool {
+    true
 }
 
 impl Default for Prefs {
@@ -33,20 +27,14 @@ impl Default for Prefs {
         Self {
             auto_update: true,
             auto_start: true,
-            default_dir: String::new(),
-            max_concurrent: 3,
-            max_segments: 8,
-            proxy: ProxyCfg::default(),
+            engine: EngineSettings::default(),
         }
     }
 }
 
 impl Prefs {
     pub fn apply_engine(&mut self, s: &EngineSettings) {
-        self.default_dir = s.default_dir.clone();
-        self.max_concurrent = s.max_concurrent;
-        self.max_segments = s.max_segments;
-        self.proxy = s.proxy.clone();
+        self.engine = s.clone();
     }
 }
 

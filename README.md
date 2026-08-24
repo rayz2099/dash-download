@@ -2,7 +2,7 @@
 
 English | [中文](#dash-download-中文)
 
-A cross-platform download manager, rewritten from [Neat Download Manager](https://www.neatdownloadmanager.com/index.php/en/). HTTP/HTTPS only. The engine is a resident Rust Core inside a Tauri desktop app; the Chrome extension is a thin client of the same localhost API.
+A cross-platform download manager, rewritten from [Neat Download Manager](https://www.neatdownloadmanager.com/index.php/en/). HTTP/HTTPS and BitTorrent (magnet / `.torrent`). The engine is a resident Rust Core inside a Tauri desktop app; the Chrome extension is a thin client of the same localhost API.
 
 Closing the window hides it to the tray. Downloads keep running.
 
@@ -71,7 +71,7 @@ With takeover **on** (the default), click a normal file link in the browser. Chr
 Other ways to send a file:
 
 - Right-click a link → **使用 Dash Download 下载**. This bypasses size / type / deny-list filters.
-- In the app, **新建下载** and paste a URL.
+- In the app, **新建下载** and paste a URL or magnet, or pick a `.torrent`.
 
 The popup also has:
 
@@ -85,6 +85,7 @@ Left for Chrome on purpose: `text/html`, files under the size threshold, deny-li
 
 - Pause / resume / redownload from the task table or the row context menu. URL and request headers stay with the Task.
 - Settings → General: default folder, concurrent tasks, connections per task, launch at login.
+- Settings → P2P: off by default. Turn it on for magnet DHT fallback, torrent download, and seeding.
 - Settings → Proxy: direct / env (`HTTP_PROXY`) / HTTP / SOCKS5. Probe before you rely on it.
 - Settings → Update: the app checks GitHub Releases. The **extension is not auto-updated** — download the new zip, overwrite the folder, Reload unpacked.
 - Closing the window does not stop downloads. Quit from the tray when you actually want the engine gone.
@@ -107,7 +108,8 @@ Left for Chrome on purpose: `text/html`, files under the size threshold, deny-li
 - Crash-safe SQLite checkpoints; preallocated single-file `pwrite` (temp name `*.ddown`, rename on complete)
 - Queue with a concurrency cap (default 3 tasks, 8 connections each); both are in Settings
 - NDM-style table UI, native title bar, tray
-- Chrome MV3 Takeover: intercept browser downloads and forward cookies / referer / user-agent
+- Chrome MV3 Takeover: intercept browser downloads and forward cookies / referer / user-agent; magnet clicks and `.torrent` files go to Core
+- BitTorrent: magnet / `.torrent`, file selection, optional public trackers, seeding
 
 Not in v1: dynamic re-segmentation, rate limit, HLS/DASH/FTP, video sniffing.
 
@@ -189,7 +191,7 @@ just open           # open the last macOS .app
 
 [English](#dash-download) | 中文
 
-跨平台下载管理器, 重写 [Neat Download Manager](https://www.neatdownloadmanager.com/index.php/en/). 只做 HTTP/HTTPS. 引擎是 Tauri 桌面 app 内的常驻 Rust Core; Chrome 扩展是同一套 localhost API 的薄客户端.
+跨平台下载管理器, 重写 [Neat Download Manager](https://www.neatdownloadmanager.com/index.php/en/). HTTP/HTTPS 与 BitTorrent (磁力 / `.torrent`). 引擎是 Tauri 桌面 app 内的常驻 Rust Core; Chrome 扩展是同一套 localhost API 的薄客户端.
 
 关窗缩到托盘, 下载不中断.
 
@@ -258,7 +260,7 @@ sudo apt-get install -f
 另外两种入口:
 
 - 链接上右键 → **使用 Dash Download 下载**. 绕过体积 / 类型 / 黑名单过滤.
-- 应用内 **新建下载**, 粘贴 URL.
+- 应用内 **新建下载**, 粘贴 URL 或磁力, 或选 `.torrent`.
 
 popup 里还能调:
 
@@ -272,6 +274,7 @@ popup 里还能调:
 
 - 任务表或行右键: 暂停 / 继续 / 重新下载. URL 与请求头随 Task 永久保留.
 - 设置 → 通用: 默认目录, 同时下载数, 每任务连接数, 开机自启.
+- 设置 → P2P: 默认关闭. 磁力 DHT 回退, 种子下载和做种需要打开.
 - 设置 → 代理: 直连 / 跟随环境变量 (`HTTP_PROXY`) / HTTP / SOCKS5. 先探测再当真.
 - 设置 → 更新: app 会查 GitHub Release. **扩展不会自动更新** — 下新 zip, 覆盖原目录, 再 Reload.
 - 关窗不停下载. 真要停引擎, 从托盘退出.
@@ -294,7 +297,8 @@ popup 里还能调:
 - SQLite checkpoint 可从崩溃恢复; 预分配单文件 `pwrite` (下载中 `*.ddown`, 完成后 rename)
 - 队列并发可配 (默认 3 个 Task, 每 Task 8 连接), 在设置页
 - NDM 式表格 UI, 原生标题栏, 托盘
-- Chrome MV3 Takeover: 接管浏览器下载并带走 cookies / referer / user-agent
+- Chrome MV3 Takeover: 接管浏览器下载并带走 cookies / referer / user-agent; 磁力点击和 `.torrent` 交给 Core
+- BitTorrent: 磁力 / `.torrent`, 选文件, 可选公共 tracker, 做种
 
 v1 不做: 动态再切段, 限速, HLS/DASH/FTP, 视频嗅探.
 

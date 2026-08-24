@@ -33,3 +33,16 @@ function connect() {
   });
 }
 connect();
+
+document.addEventListener("click", (e) => {
+  const a = e.target && e.target.closest && e.target.closest("a[href^='magnet:']");
+  if (!a) return;
+  // 必须同步 preventDefault, 否则页面已经走 magnet: handler. 接管失败再交回浏览器.
+  e.preventDefault();
+  e.stopPropagation();
+  chrome.runtime.sendMessage({ op: "magnet", url: a.href }, (ok) => {
+    if (chrome.runtime.lastError || !ok) {
+      location.href = a.href;
+    }
+  });
+}, true);

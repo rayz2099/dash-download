@@ -1,6 +1,6 @@
 # Roadmap
 
-当前里程碑: **v0.1 可用** (macOS arm, http/https, Chrome 扩展 Takeover). 下面按不可逆程度排序, 不做时间承诺.
+当前里程碑: **磁力 / 种子** (本地 BitTorrent, 与 HTTP Task 并列). 下面按不可逆程度排序, 不做时间承诺.
 
 ## v0.1 — 已交付
 
@@ -35,7 +35,10 @@ tag (`v*`) 会走 `.github/workflows/release.yml`: 分平台打 app 包 + Chrome
 
 ## 明确不做 (直到有人推翻)
 
-- HLS / DASH / FTP: 新协议, 与 v1 的 http/https 边界冲突
+- HLS / DASH / FTP: 新协议, Core HTTP 路径仍只吃 http/https
+- 网盘 Provider (百度/夸克/PikPak): 推迟; 不做厂商协议逆向 (ADR 0006)
+- 本地 libtorrent / 自研 BT: 用 librqbit (ADR 0007)
+- WebSeed (BEP-17/19): librqbit 缺口, 本期不做
 - 视频嗅探: 属于扩展能力膨胀, 不是下载引擎
 - Kotlin/JVM 引擎: ADR 0001
 - 浏览器内嵌管理页: ADR 0005

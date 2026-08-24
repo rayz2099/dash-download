@@ -29,9 +29,10 @@ function sleep(ms) {
 async function ping() {
   try {
     const resp = await fetch(API + "/api/ping");
-    return resp.ok;
+    if (!resp.ok) return null;
+    return await resp.json();
   } catch (_) {
-    return false;
+    return null;
   }
 }
 
@@ -46,23 +47,25 @@ async function registerOrigin() {
 
 /// app 没跑时走 native host 拉起; 拉不起就不要 abort Chrome 下载.
 async function ensureApp() {
-  if (await ping()) {
+  let info = await ping();
+  if (info) {
     registerOrigin();
-    return true;
+    return info;
   }
   try {
     await chrome.runtime.sendNativeMessage(NATIVE, { op: "wake" });
   } catch (_) {
-    return false;
+    return null;
   }
   for (let i = 0; i < 40; i++) {
     await sleep(250);
-    if (await ping()) {
+    info = await ping();
+    if (info) {
       registerOrigin();
-      return true;
+      return info;
     }
   }
-  return false;
+  return null;
 }
 
 async function api(path, opts) {
@@ -113,8 +116,26 @@ function notify(title, message) {
   } catch (_) { /* 无通知权限时只打日志 */ }
 }
 
+async function sendTorrent(payload) {
+  const t = await api("/api/torrents", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  api("/api/focus", { method: "POST" }).catch(() => {});
+  return t;
+}
+
 async function sendToApp(url, extra) {
   extra = extra || {};
+  if (/^magnet:/i.test(url)) {
+    return sendTorrent({ magnet: url });
+  }
+  const torrent = extra.torrent || /\.torrent(\?|#|$)/i.test(url)
+    || (extra.mime || "").toLowerCase().indexOf("bittorrent") >= 0;
+  if (torrent && !extra.contentB64) {
+    const headers = await buildHeaders(url, extra.referrer);
+    return sendTorrent({ torrent_url: url, headers });
+  }
   const headers = extra.contentB64 ? [] : await buildHeaders(url, extra.referrer);
   const body = { url, name: extra.filename, headers };
   if (extra.contentB64) {
@@ -131,6 +152,26 @@ async function sendToApp(url, extra) {
   api("/api/focus", { method: "POST" }).catch(() => {});
   return task;
 }
+
+chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
+  if (!msg || msg.op !== "magnet" || !msg.url) return;
+  if (!cached.enabled) {
+    sendResponse(false);
+    return;
+  }
+  ensureApp().then((info) => {
+    if (!info) {
+      sendResponse(false);
+      return;
+    }
+    return sendTorrent({ magnet: msg.url }).then(() => sendResponse(true));
+  }).catch((e) => {
+    console.warn("磁力接管失败:", e);
+    notify("接管失败", e && e.message ? e.message : e);
+    sendResponse(false);
+  });
+  return true;
+});
 
 function readBlob(url) {
   return new Promise((resolve, reject) => {
@@ -221,11 +262,12 @@ function takeover(item) {
   inflight.add(key);
   setTimeout(() => { inflight.delete(item.id); inflight.delete(key); }, 12000);
 
-  ensureApp().then(async (ok) => {
-    if (!ok) return;
+  ensureApp().then(async (info) => {
+    if (!info) return;
     await captureUrl(url, {
       referrer: item.referrer,
       filename: basename(item.filename),
+      mime: item.mime,
     });
     sent.add(key);
     abortChrome(item.id);

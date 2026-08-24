@@ -22,8 +22,9 @@ setup:
     pnpm --dir ui install
     rustup target add {{target_macos}} {{target_linux}} {{target_windows}}
 
-# 开发模式: vite + tauri 热更新
+# 开发模式: vite + tauri 热更新. 先清 debug 残留, 避免 41320 被占窗口起不来.
 dev:
+    pkill -f 'target/.*/debug/dd-app' 2>/dev/null || true
     cd "{{app_dir}}" && "{{tauri}}" dev
 
 # 打开最近一次 macOS 产物 (优先带 --target 的路径)

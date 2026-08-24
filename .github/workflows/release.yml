@@ -142,6 +142,21 @@ jobs:
           includeUpdaterJson: false
           args: ${{ matrix.args }}
 
+      # linker-signed Mach-O 不是 bundle 签. 带 quarantine 时 Gatekeeper 报已损坏, 右键也救不回来.
+      # signingIdentity "-" 必须在打 tar.gz / dmg 之前生效, 所以这里只验, 不补签.
+      - name: Verify macOS ad-hoc bundle signature
+        if: matrix.host == 'macos-latest'
+        run: |
+          app="target/aarch64-apple-darwin/release/bundle/macos/Dash Download.app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          meta=$(codesign -dv --verbose=2 "$app" 2>&1)
+          echo "$meta"
+          echo "$meta" | grep -q 'Identifier=dev.ray.dash-download'
+          if echo "$meta" | grep -q linker-signed; then
+            echo "still linker-signed; signingIdentity - did not apply" >&2
+            exit 1
+          fi
+
 
   # tauri-action 默认文件名带空格/点, 改成 DashDownload-{ver}-{os}-{arch} 后再转正.
   # 必须传 release_id: draft 的 /releases/tags/{tag} 是 404 (v1.2.1 就是这样挂的).

@@ -46,6 +46,7 @@ open:
 macos-arm:
     rustup target add {{target_macos}}
     cd "{{app_dir}}" && "{{tauri}}" build --target {{target_macos}} --bundles app --config '{{no_updater}}'
+    codesign --verify --deep --strict "{{root}}/target/{{target_macos}}/release/bundle/macos/Dash Download.app"
     @echo "→ {{root}}/target/{{target_macos}}/release/bundle/macos/Dash Download.app"
 
 # 编译 Linux x86_64 (deb). 在非 Linux 主机上需要对应 linker / webkit sysroot, 本机 mac 上通常编不过

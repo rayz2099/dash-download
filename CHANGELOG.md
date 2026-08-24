@@ -1,3 +1,8 @@
+## 1.2.3 - 2026-08-24
+
+### Fixes
+- macOS `.app` is ad-hoc signed as a bundle (`signingIdentity: "-"`). Linker-only signatures made Gatekeeper call the download "damaged"
+
 ## 1.2.2 - 2026-08-24
 
 ### Fixes

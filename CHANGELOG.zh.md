@@ -1,3 +1,8 @@
+## 1.2.3 - 2026-08-24
+
+### 修复
+- macOS `.app` 打 bundle 级 ad-hoc 签 (`signingIdentity: "-"`). 之前只有 linker 签, 下载后 Gatekeeper 报已损坏
+
 ## 1.2.2 - 2026-08-24
 
 ### 修复

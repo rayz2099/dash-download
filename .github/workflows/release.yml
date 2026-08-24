@@ -63,26 +63,36 @@ jobs:
             }
             core.setOutput("release_id", String(release.id));
 
+  # job-level if 不能引用 matrix.*, 先筛平台再展开.
+  matrix-prep:
+    runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+      run_app: ${{ steps.set.outputs.run_app }}
+    steps:
+      - id: set
+        uses: actions/github-script@v7
+        env:
+          PLATFORM: ${{ env.PLATFORM }}
+        with:
+          script: |
+            const all = [
+              { host: "macos-latest", rust_target: "aarch64-apple-darwin", args: "--target aarch64-apple-darwin --bundles app,dmg", platform: "macos" },
+              { host: "ubuntu-22.04", rust_target: "x86_64-unknown-linux-gnu", args: "--target x86_64-unknown-linux-gnu --bundles deb,appimage", platform: "linux" },
+              { host: "windows-latest", rust_target: "x86_64-pc-windows-msvc", args: "--target x86_64-pc-windows-msvc --bundles nsis", platform: "windows" },
+            ];
+            const p = process.env.PLATFORM || "all";
+            const sel = p === "all" ? all : all.filter((x) => x.platform === p);
+            core.setOutput("run_app", sel.length ? "true" : "false");
+            core.setOutput("matrix", JSON.stringify({ include: sel.length ? sel : all }));
+
   app:
-    needs: prepare
+    needs: [prepare, matrix-prep]
+    if: ${{ needs.matrix-prep.outputs.run_app == 'true' }}
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - host: macos-latest
-            rust_target: aarch64-apple-darwin
-            args: --target aarch64-apple-darwin --bundles app,dmg
-            platform: macos
-          - host: ubuntu-22.04
-            rust_target: x86_64-unknown-linux-gnu
-            args: --target x86_64-unknown-linux-gnu --bundles deb,appimage
-            platform: linux
-          - host: windows-latest
-            rust_target: x86_64-pc-windows-msvc
-            args: --target x86_64-pc-windows-msvc --bundles nsis
-            platform: windows
+      matrix: ${{ fromJSON(needs.matrix-prep.outputs.matrix) }}
     runs-on: ${{ matrix.host }}
-    if: ${{ github.event_name == 'push' || github.event.inputs.platform == 'all' || github.event.inputs.platform == matrix.platform }}
     steps:
       - uses: actions/checkout@v4
 

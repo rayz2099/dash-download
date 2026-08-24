@@ -4,6 +4,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod api;
+mod gh_update;
 mod launch;
 mod prefs;
 mod updater;

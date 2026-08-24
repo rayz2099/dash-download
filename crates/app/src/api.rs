@@ -87,6 +87,8 @@ pub async fn serve(ctx: Arc<ApiCtx>, port: u16) -> std::io::Result<()> {
     let app = Router::new()
         // ping 不要求自定义头: 扩展 popup 健康检查
         .route("/api/ping", get(ping))
+        // Tauri updater 用 reqwest 拉清单, 不带 x-dd-client
+        .route("/api/updater-manifest", get(updater_manifest))
         // WS 无法带自定义 header, 只在 handler 里校验 Origin
         .route("/api/ws", get(ws_handler))
         .merge(authed)
@@ -149,6 +151,18 @@ async fn ping(State(ctx): State<Arc<ApiCtx>>) -> impl IntoResponse {
         "version": env!("CARGO_PKG_VERSION"),
         "p2p": ctx.engine.settings().p2p,
     }))
+}
+
+/// 给 tauri-plugin-updater: 现查 GitHub API, 把 asset+.sig 拼成它要的静态清单.
+async fn updater_manifest() -> Response {
+    match crate::gh_update::tauri_manifest().await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": e })),
+        )
+            .into_response(),
+    }
 }
 
 async fn list_tasks(State(ctx): State<Arc<ApiCtx>>) -> Result<Response, ApiError> {

@@ -52,7 +52,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDFGOEEyRDc2OTA5QTA2RgpSV1J2b0FscDE2TDRBUXdCMzVMV3hMUDB3VmNhcWJxOU4xUWttdXNUTUVRcVVidVAxMW0vb1JabAo=",
       "endpoints": [
-        "https://github.com/rayz2099/dash-download/releases/latest/download/latest.json"
+        "http://127.0.0.1:41320/api/updater-manifest"
       ],
       "windows": {
         "installMode": "quiet"

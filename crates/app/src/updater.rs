@@ -1,6 +1,7 @@
-//! 从 GitHub Release 的 latest.json 拉差分安装包.
-//! 验签后才替换本机二进制; 有正在跑的 Task 时等到空闲再 install/restart, 避免截断 pwrite.
+//! 用 GitHub Releases API 发现版本和带 .sig 的安装包, 再交给 tauri-plugin-updater 验签安装.
+//! 有正在跑的 Task 时等到空闲再 install/restart, 避免截断 pwrite.
 
+use crate::gh_update::{GH_LATEST, MANIFEST_URL};
 use crate::prefs;
 use dd_core::Engine;
 use serde::Serialize;
@@ -8,9 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Manager};
 use tauri_plugin_updater::UpdaterExt;
-
-/// 与 tauri.conf plugins.updater.endpoints 对齐, 失败日志里要带上才能对照 Release 资产.
-const ENDPOINT: &str = "https://github.com/rayz2099/dash-download/releases/latest/download/latest.json";
+use url::Url;
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -110,7 +109,7 @@ impl Updater {
         may_install: bool,
         force_install: bool,
     ) -> Result<Status, String> {
-        // debug 包没有签名产物, 去拉 latest.json 只会在 UI 上留下假失败.
+        // debug 包没有签名产物, 去打 GitHub 只会在 UI 上留下假失败.
         if cfg!(debug_assertions) {
             if let Some(phase) = debug_manual_phase(may_install) {
                 self.set_phase(phase, None);
@@ -145,8 +144,12 @@ impl Updater {
         may_install: bool,
         force_install: bool,
     ) -> Result<(), String> {
+        let endpoint = Url::parse(MANIFEST_URL).map_err(|e| e.to_string())?;
         let update = app
-            .updater()
+            .updater_builder()
+            .endpoints(vec![endpoint])
+            .map_err(|e| e.to_string())?
+            .build()
             .map_err(|e| e.to_string())?
             .check()
             .await
@@ -213,13 +216,9 @@ fn debug_manual_phase(may_install: bool) -> Option<Phase> {
     }
 }
 
-/// 404 HTML 和传输失败原文都要保留, 设置页复制日志时才能对照 Release 资产.
+/// 清单由本机 /api/updater-manifest 现查 GitHub API 拼出; 原文留给设置页复制.
 fn explain_check(raw: String) -> String {
-    if raw.contains("valid release JSON") || raw.contains("404") {
-        format!("GitHub Release 缺少 latest.json ({ENDPOINT}): {raw}")
-    } else {
-        format!("updater check {ENDPOINT}: {raw}")
-    }
+    format!("GitHub Releases API ({GH_LATEST}): {raw}")
 }
 
 pub fn spawn_loop(app: AppHandle) {

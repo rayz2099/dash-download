@@ -462,7 +462,7 @@ export function SettingsPage(props: {
           {tab === "update" && (
             <>
               <h1 class="page-title">更新</h1>
-              <p class="page-sub">来源 GitHub Release. 有任务在下时会等它结束再重启.</p>
+              <p class="page-sub">查 GitHub Releases API, 验签后安装. 有任务在下时会等它结束再重启.</p>
               <div class="settings-card">
                 <div class="settings-row">
                   <div>

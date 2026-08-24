@@ -187,8 +187,11 @@ impl Updater {
 
     async fn wait_idle(&self) -> Result<(), String> {
         loop {
-            let ts = self.engine.list().map_err(|e| e.to_string())?;
-            if !ts.iter().any(|t| t.state.is_running()) {
+            let http = self.engine.list().map_err(|e| e.to_string())?;
+            let bt = self.engine.list_torrents().map_err(|e| e.to_string())?;
+            let http_busy = http.iter().any(|t| t.state.is_running());
+            let bt_busy = bt.iter().any(|t| t.state.is_downloading());
+            if !http_busy && !bt_busy {
                 return Ok(());
             }
             tokio::time::sleep(Duration::from_millis(500)).await;

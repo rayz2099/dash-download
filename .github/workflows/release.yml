@@ -1,4 +1,11 @@
-# tag 推送打全平台; workflow_dispatch 可只打 macos / linux / windows / extension, 挂到已有 Release.
+# 自动更新链路:
+# 1. prepare 先建 draft Release (不要立刻变成 /releases/latest, 否则 latest.json 还没上传时旧版检查 404)
+# 2. 各平台 tauri-action 把安装包 + .sig 挂到同一 Release
+# 3. updater-manifest 用已有 .sig 写 latest.json; 缺平台只 warning, 有 darwin 就能给 mac 用户升级
+# 4. normalize 改资产名并改写 latest.json 里的 URL
+# 5. publish 把 draft 转正, /releases/latest 才切过来
+#
+# tag 推送打全平台; workflow_dispatch 可只打 macos / linux / windows / extension, 挂到已有 tag.
 name: release
 
 on:
@@ -49,6 +56,7 @@ jobs:
               tag_name: tag,
               name: `Dash Download ${tag}`,
               generate_release_notes: true,
+              draft: true,
             };
             let release;
             try {
@@ -151,7 +159,6 @@ jobs:
             const { owner, repo } = context.repo;
             const releaseId = Number("${{ needs.prepare.outputs.release_id }}");
             const tag = process.env.RELEASE_TAG;
-            const full = process.env.PLATFORM === "all";
             const release = (await github.rest.repos.getRelease({
               owner, repo, release_id: releaseId,
             })).data;
@@ -192,11 +199,11 @@ jobs:
             const platforms = { ...existing, ...Object.fromEntries(entries) };
             const missing = ["darwin-aarch64", "linux-x86_64", "windows-x86_64"]
               .filter((k) => !platforms[k]);
-            if (full && missing.length) {
-              throw new Error("latest.json 缺平台: " + missing.join(","));
+            if (!Object.keys(platforms).length) {
+              throw new Error("latest.json 没有任何平台 .sig, 旧版会检查 404");
             }
             if (missing.length) {
-              core.warning("latest.json 仍缺: " + missing.join(","));
+              core.warning("latest.json 仍缺 (仍上传已有平台): " + missing.join(","));
             }
             const version = tag.replace(/^v/, "");
             const body = {
@@ -205,11 +212,22 @@ jobs:
               pub_date: new Date().toISOString(),
               platforms,
             };
-            if (old) {
-              await github.rest.repos.deleteReleaseAsset({
-                owner, repo, asset_id: old.id,
-              });
+            // 先上传再删旧文件, 窗口期内 latest.json 始终能 GET 到
+            await github.rest.repos.uploadReleaseAsset({
+              owner,
+              repo,
+              release_id: releaseId,
+              name: "latest.json.next",
+              data: JSON.stringify(body, null, 2),
+              headers: { "content-type": "application/json" },
+            });
+            const after = (await github.rest.repos.getRelease({ owner, repo, release_id: releaseId })).data.assets;
+            const staged = after.find((a) => a.name === "latest.json.next");
+            const prev = after.find((a) => a.name === "latest.json");
+            if (prev) {
+              await github.rest.repos.deleteReleaseAsset({ owner, repo, asset_id: prev.id });
             }
+            // GitHub 不能 rename asset, 再传一份正式名后删 staging
             await github.rest.repos.uploadReleaseAsset({
               owner,
               repo,
@@ -218,6 +236,9 @@ jobs:
               data: JSON.stringify(body, null, 2),
               headers: { "content-type": "application/json" },
             });
+            if (staged) {
+              await github.rest.repos.deleteReleaseAsset({ owner, repo, asset_id: staged.id });
+            }
             core.info("uploaded latest.json platforms=" + Object.keys(body.platforms).join(","));
 
   # tauri-action 默认文件名带空格/点, 改成 DashDownload-{ver}-{os}-{arch} 后再让 prune 跑.
@@ -249,13 +270,42 @@ jobs:
           cp -R extension/. dist-ext/dash-download-chrome/
           (cd dist-ext && zip -r "../dash-download-chrome-${tag}.zip" dash-download-chrome)
 
-      - uses: softprops/action-gh-release@v2
+      - name: Upload extension zip
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ env.RELEASE_TAG }}
+        run: gh release upload "${RELEASE_TAG}" "dash-download-chrome-${RELEASE_TAG}.zip" --clobber
+
+  # latest.json 就位后再把 draft 转正, /releases/latest 才切到本 tag
+  publish:
+    needs: [prepare, updater-manifest, normalize-assets]
+    if: ${{ !cancelled() && needs.updater-manifest.result == 'success' }}
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/github-script@v7
         with:
-          tag_name: ${{ env.RELEASE_TAG }}
-          files: dash-download-chrome-${{ env.RELEASE_TAG }}.zip
+          script: |
+            const { owner, repo } = context.repo;
+            const releaseId = Number("${{ needs.prepare.outputs.release_id }}");
+            const release = (await github.rest.repos.getRelease({
+              owner, repo, release_id: releaseId,
+            })).data;
+            const hasJson = release.assets.some((a) => a.name === "latest.json");
+            if (!hasJson) {
+              core.warning("no latest.json, leave draft unpublished");
+              return;
+            }
+            if (!release.draft) {
+              core.info("already published");
+              return;
+            }
+            await github.rest.repos.updateRelease({
+              owner, repo, release_id: releaseId, draft: false,
+            });
+            core.info("published " + release.tag_name);
 
   prune:
-    needs: [app, extension, updater-manifest, normalize-assets]
+    needs: [app, extension, updater-manifest, normalize-assets, publish]
     if: ${{ github.event_name == 'push' && !cancelled() }}
     runs-on: ubuntu-22.04
     steps:

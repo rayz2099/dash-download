@@ -72,14 +72,15 @@ function upHint(st: UpdateStatus): string {
   return updatePhaseText(st);
 }
 
-/** 拼完整失败现场, 因为 hint 不可选中, 需要一块能直接复制的原文. */
+/** 拼完整失败现场, 因为 hint 不可选中, 需要一块能直接复制的原文.
+ * endpoint 必须是 GitHub API: 1.2.1+ 不再读 latest.json, 日志里写旧 URL 会误导排查. */
 function upLogText(st: UpdateStatus, ver: string): string {
   return [
     `phase: ${st.phase}`,
     `error: ${st.error}`,
     `version: ${ver}`,
     `latest: ${st.latest}`,
-    "endpoint: https://github.com/rayz2099/dash-download/releases/latest/download/latest.json",
+    "endpoint: https://api.github.com/repos/rayz2099/dash-download/releases/latest",
   ].join("\n");
 }
 

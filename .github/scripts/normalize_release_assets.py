@@ -18,7 +18,6 @@ import re
 import subprocess
 import sys
 import tempfile
-import urllib.parse
 from pathlib import Path
 
 APP = "DashDownload"
@@ -106,39 +105,14 @@ def download_asset(repo: str, asset_id: int, dest: Path, size: int) -> None:
         raise SystemExit(f"asset {asset_id}: downloaded {got} bytes, github size {size}")
 
 
-def upload_asset(repo: str, release_id: int, path: Path, name: str) -> None:
-    q = urllib.parse.urlencode({"name": name})
-    run(
-        [
-            "gh",
-            "api",
-            "--method",
-            "POST",
-            "--hostname",
-            "uploads.github.com",
-            "-H",
-            "Accept: application/vnd.github+json",
-            "-H",
-            "Content-Type: application/octet-stream",
-            "--input",
-            str(path),
-            f"repos/{repo}/releases/{release_id}/assets?{q}",
-        ],
-        capture_output=True,
-    )
+def upload_asset(tag: str, path: Path) -> None:
+    # uploads.github.com + gh api 不会带 GH_TOKEN, 1.2.2 在这里挂了.
+    # gh release upload 跟 extension job 同一条路, draft 也能传.
+    run(["gh", "release", "upload", tag, str(path), "--clobber"])
 
 
-def delete_asset(repo: str, asset_id: int) -> None:
-    run(
-        [
-            "gh",
-            "api",
-            "--method",
-            "DELETE",
-            f"repos/{repo}/releases/assets/{asset_id}",
-        ],
-        capture_output=True,
-    )
+def delete_asset(tag: str, name: str) -> None:
+    run(["gh", "release", "delete-asset", tag, name, "--yes"])
 
 
 def main() -> int:
@@ -173,8 +147,8 @@ def main() -> int:
             dest = tmp_path / new
             print(f"rename {old} -> {new} ({asset['size']} bytes)")
             download_asset(repo, int(asset["id"]), dest, asset["size"])
-            upload_asset(repo, int(release_id), dest, new)
-            delete_asset(repo, int(asset["id"]))
+            upload_asset(tag, dest)
+            delete_asset(tag, old)
             by_name[new] = asset
     return 0
 

@@ -421,15 +421,17 @@ fn main() {
         })
         .build(tauri::generate_context!())
         .expect("tauri build")
-        .run(move |app, event| match event {
+        .run(move |app, event| {
             // setup 里 show 太早, 事件循环起来后再抬一次
-            tauri::RunEvent::Ready => {
+            if let tauri::RunEvent::Ready = event {
                 if !start_hidden {
                     show_main_window(app);
                 }
             }
-            // 点 Dock 图标: 刘海挡住托盘时这是唯一入口
-            tauri::RunEvent::Reopen { .. } => show_main_window(app),
-            _ => {}
+            // Reopen 只在 macOS: 点 Dock 图标. linux/windows 枚举里没有这个变体.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = event {
+                show_main_window(app);
+            }
         });
 }

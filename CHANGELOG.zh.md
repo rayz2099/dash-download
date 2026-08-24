@@ -1,3 +1,9 @@
+## 1.2.4 - 2026-08-24
+
+### 修复
+- release 包不再启动即崩: updater 放行 loopback HTTP, 本机 GitHub 清单代理才能反序列化
+- macOS DMG 带 `打开应用.command`, 把带隔离属性的下载拷到 Applications 再打开
+
 ## 1.2.3 - 2026-08-24
 
 ### 修复

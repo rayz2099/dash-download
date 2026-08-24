@@ -1,3 +1,9 @@
+## 1.2.4 - 2026-08-24
+
+### Fixes
+- Release build no longer panics at launch: updater allows the loopback HTTP GitHub manifest proxy
+- macOS DMG includes `打开应用.command` so a quarantined download can be copied to Applications and opened
+
 ## 1.2.3 - 2026-08-24
 
 ### Fixes

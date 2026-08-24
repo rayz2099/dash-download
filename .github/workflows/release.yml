@@ -157,6 +157,27 @@ jobs:
             exit 1
           fi
 
+      # 1.2.1-1.2.3 签名是好的, 但 updater http endpoint 让 release 进程秒退.
+      - name: Smoke macOS release binary
+        if: matrix.host == 'macos-latest'
+        run: bash .github/scripts/smoke_macos_app.sh "target/aarch64-apple-darwin/release/bundle/macos/Dash Download.app"
+
+      # Finder 双击未公证 app 在 macOS 15+ 只有 Done / Move to Bin. DMG 里塞清 quarantine 的脚本.
+      - name: Patch macOS DMG with opener
+        if: matrix.host == 'macos-latest'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ env.RELEASE_TAG }}
+        run: |
+          shopt -s nullglob
+          dmgs=(target/aarch64-apple-darwin/release/bundle/dmg/*.dmg)
+          if [[ ${#dmgs[@]} -ne 1 ]]; then
+            echo "expected 1 dmg, got ${#dmgs[@]}: ${dmgs[*]}" >&2
+            exit 1
+          fi
+          bash .github/scripts/patch_macos_dmg.sh "${dmgs[0]}" .github/scripts/macos-install.command
+          gh release upload "${RELEASE_TAG}" "${dmgs[0]}" --clobber
+
 
   # tauri-action 默认文件名带空格/点, 改成 DashDownload-{ver}-{os}-{arch} 后再转正.
   # 必须传 release_id: draft 的 /releases/tags/{tag} 是 404 (v1.2.1 就是这样挂的).

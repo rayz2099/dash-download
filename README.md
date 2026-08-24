@@ -25,9 +25,9 @@ v1 is dogfooded on **macOS arm64**. Linux x86_64 and Windows x86_64 packages are
 
 **macOS arm64**
 
-1. Open the `.dmg` and drag `Dash Download.app` into Applications.
-2. The build is not notarized. In Finder, **right-click** the app → **Open** → confirm Gatekeeper. A double-click is often blocked.
-3. If macOS still refuses: System Settings → Privacy & Security → **Open Anyway**.
+1. Open the `.dmg` and drag `Dash Download.app` into Applications, **or** double-click `打开应用.command` in the DMG (copies, clears quarantine, launches).
+2. The build is not notarized. A double-click shows **Not Opened** / Apple could not verify, with only **Done** and **Move to Bin**. Do not trash it. macOS 15+ removed right-click → Open.
+3. Then: System Settings → Privacy & Security → **Open Anyway**, or in Terminal: `xattr -cr /Applications/Dash\ Download.app` and open the app again.
 4. Launch Dash Download. You should see the task table. Closing the window leaves it in the menu-bar tray.
 
 Login autostart is on by default. Default save location is the user Downloads folder. Change it later in the app: Settings → General.
@@ -94,7 +94,7 @@ Left for Chrome on purpose: `text/html`, files under the size threshold, deny-li
 
 | Symptom | Fix |
 |---|---|
-| macOS: "app is damaged" / cannot be opened | Right-click → Open, or Privacy & Security → Open Anyway |
+| macOS: "Not Opened" / cannot verify / damaged | Use `打开应用.command` in the DMG, or Privacy & Security → Open Anyway, or `xattr -cr /Applications/Dash\ Download.app`. Right-click Open does nothing on macOS 15+ |
 | Popup: `app 未运行` | Launch the app once so native host is registered; then retry |
 | Chrome: "manifest file is missing" | Select the inner `dash-download-chrome` folder, not the zip |
 | Browser still saves the file itself | Check takeover is on; file may be HTML, below 1 MB, or on the deny list. Use the context menu to force it |
@@ -214,9 +214,9 @@ v1 在 **macOS arm64** 日常可用. Linux x86_64 / Windows x86_64 由 CI 打包
 
 **macOS arm64**
 
-1. 打开 `.dmg`, 把 `Dash Download.app` 拖进 Applications.
-2. 未公证. 在 Finder 里 **右键** app → **打开** → 确认 Gatekeeper. 双击经常被拦.
-3. 仍被拦: 系统设置 → 隐私与安全性 → **仍要打开**.
+1. 打开 `.dmg`, 把 `Dash Download.app` 拖进 Applications, **或** 双击 DMG 里的 `打开应用.command` (拷贝, 去掉隔离属性, 启动).
+2. 未公证. 双击会弹出 **Not Opened** / Apple could not verify, 按钮只有 **Done** 和 **Move to Bin**. 不要丢进废纸篓. macOS 15+ 已经去掉右键 → 打开.
+3. 然后: 系统设置 → 隐私与安全性 → **仍要打开**, 或终端执行 `xattr -cr /Applications/Dash\ Download.app` 再打开.
 4. 启动 Dash Download, 应看到任务表. 关窗后还在菜单栏托盘里, 下载继续.
 
 默认开机自启. 默认下到用户 Downloads, 之后可在应用内 设置 → 通用 改目录.
@@ -283,7 +283,7 @@ popup 里还能调:
 
 | 现象 | 处理 |
 |---|---|
-| macOS 提示已损坏 / 无法打开 | 右键 → 打开, 或 隐私与安全性 → 仍要打开 |
+| macOS 提示 Not Opened / 无法验证 / 已损坏 | 用 DMG 里的 `打开应用.command`, 或 隐私与安全性 → 仍要打开, 或 `xattr -cr /Applications/Dash\ Download.app`. macOS 15+ 右键打开无效 |
 | popup 显示 `app 未运行` | 先启动一次 app 完成 native host 注册, 再试 |
 | Chrome 报找不到 manifest | 选内层 `dash-download-chrome` 目录, 不要选 zip |
 | 文件仍被浏览器自己存了 | 看接管开关是否开; 可能是 HTML / 小于 1 MB / 黑名单. 右键菜单可强制发送 |

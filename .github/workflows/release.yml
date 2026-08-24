@@ -1,13 +1,33 @@
-# tag 形如 v1.0 / v1.0.0 时分别打包桌面安装包和 Chrome 扩展, 并只保留最新 3 个 GitHub Release.
+# tag 推送打全平台; workflow_dispatch 可只打 macos / linux / windows / extension, 挂到已有 Release.
 name: release
 
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Which package to build
+        type: choice
+        options:
+          - all
+          - macos
+          - linux
+          - windows
+          - extension
+        default: all
+      tag:
+        description: GitHub Release tag to attach assets to (e.g. v1.2.0)
+        required: true
+        type: string
 
 permissions:
   contents: write
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+  PLATFORM: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.platform || 'all' }}
 
 jobs:
   prepare:
@@ -17,9 +37,12 @@ jobs:
     steps:
       - id: create
         uses: actions/github-script@v7
+        env:
+          RELEASE_TAG: ${{ env.RELEASE_TAG }}
         with:
           script: |
-            const tag = context.ref.replace("refs/tags/", "");
+            const tag = process.env.RELEASE_TAG;
+            if (!tag) throw new Error("RELEASE_TAG empty");
             const body = {
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -49,13 +72,17 @@ jobs:
           - host: macos-latest
             rust_target: aarch64-apple-darwin
             args: --target aarch64-apple-darwin --bundles app,dmg
+            platform: macos
           - host: ubuntu-22.04
             rust_target: x86_64-unknown-linux-gnu
             args: --target x86_64-unknown-linux-gnu --bundles deb,appimage
+            platform: linux
           - host: windows-latest
             rust_target: x86_64-pc-windows-msvc
             args: --target x86_64-pc-windows-msvc --bundles nsis
+            platform: windows
     runs-on: ${{ matrix.host }}
+    if: ${{ github.event_name == 'push' || github.event.inputs.platform == 'all' || github.event.inputs.platform == matrix.platform }}
     steps:
       - uses: actions/checkout@v4
 
@@ -92,8 +119,8 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: crates/app
-          tagName: ${{ github.ref_name }}
-          releaseName: Dash Download ${{ github.ref_name }}
+          tagName: ${{ env.RELEASE_TAG }}
+          releaseName: Dash Download ${{ env.RELEASE_TAG }}
           releaseId: ${{ needs.prepare.outputs.release_id }}
           includeUpdaterJson: false
           args: ${{ matrix.args }}
@@ -102,15 +129,19 @@ jobs:
   # matrix 各自上传 latest.json 会互盖且可能漏传; 全部平台结束后按 .sig 重写一份.
   updater-manifest:
     needs: [prepare, app]
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && needs.app.result != 'skipped' }}
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/github-script@v7
+        env:
+          RELEASE_TAG: ${{ env.RELEASE_TAG }}
+          PLATFORM: ${{ env.PLATFORM }}
         with:
           script: |
             const { owner, repo } = context.repo;
             const releaseId = Number("${{ needs.prepare.outputs.release_id }}");
-            const tag = context.ref.replace("refs/tags/", "");
+            const tag = process.env.RELEASE_TAG;
+            const full = process.env.PLATFORM === "all";
             const release = (await github.rest.repos.getRelease({
               owner, repo, release_id: releaseId,
             })).data;
@@ -135,17 +166,27 @@ jobs:
               pair("linux-x86_64", /\.AppImage$/, /\.AppImage\.sig$/),
               pair("windows-x86_64", /x64-setup\.exe$/, /x64-setup\.exe\.sig$/),
             ])).filter(Boolean);
-            const platforms = Object.fromEntries(entries);
+            const old = assets.find((a) => a.name === "latest.json");
+            let existing = {};
+            if (old) {
+              const res = await github.request(`GET /repos/${owner}/${repo}/releases/assets/${old.id}`, {
+                headers: { Accept: "application/octet-stream" },
+              });
+              const raw = typeof res.data === "string" ? res.data : Buffer.from(res.data).toString("utf8");
+              try {
+                existing = JSON.parse(raw).platforms || {};
+              } catch (err) {
+                core.warning("old latest.json parse: " + err.message);
+              }
+            }
+            const platforms = { ...existing, ...Object.fromEntries(entries) };
             const missing = ["darwin-aarch64", "linux-x86_64", "windows-x86_64"]
               .filter((k) => !platforms[k]);
+            if (full && missing.length) {
+              throw new Error("latest.json 缺平台: " + missing.join(","));
+            }
             if (missing.length) {
-              const leftover = assets.find((a) => a.name === "latest.json");
-              if (leftover) {
-                await github.rest.repos.deleteReleaseAsset({
-                  owner, repo, asset_id: leftover.id,
-                });
-              }
-              throw new Error("latest.json 缺平台, 已删除残缺清单: " + missing.join(","));
+              core.warning("latest.json 仍缺: " + missing.join(","));
             }
             const version = tag.replace(/^v/, "");
             const body = {
@@ -154,7 +195,6 @@ jobs:
               pub_date: new Date().toISOString(),
               platforms,
             };
-            const old = assets.find((a) => a.name === "latest.json");
             if (old) {
               await github.rest.repos.deleteReleaseAsset({
                 owner, repo, asset_id: old.id,
@@ -173,7 +213,7 @@ jobs:
   # tauri-action 默认文件名带空格/点, 改成 DashDownload-{ver}-{os}-{arch} 后再让 prune 跑.
   normalize-assets:
     needs: [prepare, updater-manifest, extension]
-    if: ${{ !cancelled() && needs.updater-manifest.result == 'success' }}
+    if: ${{ !cancelled() && (needs.updater-manifest.result == 'success' || needs.updater-manifest.result == 'skipped') }}
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -181,28 +221,32 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-        run: python3 .github/scripts/normalize_release_assets.py "${{ github.ref_name }}"
+        run: python3 .github/scripts/normalize_release_assets.py "${{ env.RELEASE_TAG }}"
 
   extension:
     needs: prepare
+    if: ${{ github.event_name == 'push' || github.event.inputs.platform == 'all' || github.event.inputs.platform == 'extension' }}
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
       - name: Pack Chrome extension zip
+        env:
+          RELEASE_TAG: ${{ env.RELEASE_TAG }}
         run: |
-          tag="${GITHUB_REF_NAME}"
+          tag="${RELEASE_TAG}"
           mkdir -p dist-ext/dash-download-chrome
           cp -R extension/. dist-ext/dash-download-chrome/
           (cd dist-ext && zip -r "../dash-download-chrome-${tag}.zip" dash-download-chrome)
 
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          files: dash-download-chrome-${{ github.ref_name }}.zip
+          tag_name: ${{ env.RELEASE_TAG }}
+          files: dash-download-chrome-${{ env.RELEASE_TAG }}.zip
 
   prune:
     needs: [app, extension, updater-manifest, normalize-assets]
+    if: ${{ github.event_name == 'push' && !cancelled() }}
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/github-script@v7

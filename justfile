@@ -60,6 +60,22 @@ windows-x86:
     cd "{{app_dir}}" && "{{tauri}}" build --target {{target_windows}} --bundles nsis --config '{{no_updater}}'
     @echo "→ {{root}}/target/{{target_windows}}/release/bundle/nsis/"
 
+# 本机没有 linux/windows sysroot, cargo --target 会卡 C 依赖.
+# 用源码闸拦住 RunEvent::Reopen 这类只在 darwin 存在的变体.
+check-cross:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! awk '
+      /#\[cfg\(target_os = "macos"\)\]/ { macos=1; next }
+      /RunEvent::Reopen/ {
+        if (!macos) { print FILENAME ":" NR ": Reopen 缺少 macos cfg"; exit 1 }
+      }
+      { macos=0 }
+    ' crates/app/src/main.rs; then
+      exit 1
+    fi
+    echo "ok: RunEvent::Reopen 已 cfg macos"
+
 # 更新检查/安装决策单测. GitHub Release 真包这条验收走这里, 不靠点 UI.
 test:
     cargo test -p dd-app

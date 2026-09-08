@@ -106,13 +106,14 @@ def download_asset(repo: str, asset_id: int, dest: Path, size: int) -> None:
 
 
 def upload_asset(tag: str, path: Path) -> None:
-    # uploads.github.com + gh api 不会带 GH_TOKEN, 1.2.2 在这里挂了.
-    # gh release upload 跟 extension job 同一条路, draft 也能传.
+    # uploads.github.com 不能走 `gh api` (1.2.2 挂过).
+    # 上传仍靠 tag; prepare 必须保证同 tag 只有一份 Release, 否则会传到残留 draft.
     run(["gh", "release", "upload", tag, str(path), "--clobber"])
 
 
-def delete_asset(tag: str, name: str) -> None:
-    run(["gh", "release", "delete-asset", tag, name, "--yes"])
+def delete_asset(repo: str, asset_id: int) -> None:
+    # 按 asset id 删, 避免 `gh release delete-asset <tag>` 打到另一份同 tag draft.
+    run(["gh", "api", "--method", "DELETE", f"repos/{repo}/releases/assets/{asset_id}"])
 
 
 def main() -> int:
@@ -148,7 +149,7 @@ def main() -> int:
             print(f"rename {old} -> {new} ({asset['size']} bytes)")
             download_asset(repo, int(asset["id"]), dest, asset["size"])
             upload_asset(tag, dest)
-            delete_asset(tag, old)
+            delete_asset(repo, int(asset["id"]))
             by_name[new] = asset
     return 0
 

@@ -49,24 +49,22 @@ jobs:
           script: |
             const tag = process.env.RELEASE_TAG;
             if (!tag) throw new Error("RELEASE_TAG empty");
-            const body = {
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              tag_name: tag,
-              name: `Dash Download ${tag}`,
-              generate_release_notes: true,
-              draft: true,
-            };
-            let release;
-            try {
-              release = (await github.rest.repos.createRelease(body)).data;
-            } catch (err) {
-              const existing = await github.rest.repos.getReleaseByTag({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                tag,
-              });
-              release = existing.data;
+            const { owner, repo } = context.repo;
+            // getReleaseByTag 对 draft 是 404, createRelease 同 tag 会再开一份.
+            // 先扫列表(含 draft), 同一 tag 只复用, 否则 linux/win 和 macos 会拆到两个 Release.
+            const listed = await github.paginate(github.rest.repos.listReleases, {
+              owner, repo, per_page: 100,
+            });
+            let release = listed.find((item) => item.tag_name === tag);
+            if (!release) {
+              release = (await github.rest.repos.createRelease({
+                owner,
+                repo,
+                tag_name: tag,
+                name: `Dash Download ${tag}`,
+                generate_release_notes: true,
+                draft: true,
+              })).data;
             }
             core.setOutput("release_id", String(release.id));
 

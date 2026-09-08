@@ -1,3 +1,9 @@
+## 1.2.6 - 2026-09-08
+
+### Fixes
+- Confirming batch delete closes the dialog immediately; a single failed request no longer leaves the modal stuck
+- Chrome extension toolbar icon refreshed
+
 ## 1.2.5 - 2026-08-24
 
 ### Fixes

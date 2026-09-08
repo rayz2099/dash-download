@@ -1,10 +1,11 @@
-//! Tauri app 入口: Rust 常驻核心 (引擎 + localhost API) + webview UI.
-//! 关窗只隐藏, 进程随托盘存活, 下载不中断 (ADR 0005).
+//! Tauri app 入口: Rust 常驻核心 (引擎 + 私有 IPC) + webview UI.
+//! 关窗只隐藏, 进程随托盘存活, 下载不中断 (ADR 0005). 不 bind 127.0.0.1:41320.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod api;
 mod gh_update;
+mod ipc;
 mod launch;
 mod prefs;
 mod updater;
@@ -18,7 +19,8 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::Manager;
 use tauri_plugin_autostart::ManagerExt;
 
-use launch::API_PORT;
+use serde_json::Value;
+use tauri::Emitter;
 
 /// 只在 debug / `tauri dev` 开日志. 同时写 stderr 和 cfg_dir/debug.log, 方便 agent tail.
 fn init_debug_log(cfg_dir: &PathBuf) {
@@ -92,10 +94,9 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Tee {
     }
 }
 
-/// UI 启动时通过 invoke 拿到的引导信息, 之后全部流量走 localhost API
+/// UI 启动时通过 invoke 拿到的引导信息, 之后控制面走 invoke / 引擎事件.
 #[derive(Clone, Serialize)]
 struct Boot {
-    port: u16,
     default_dir: String,
     version: String,
 }
@@ -103,6 +104,11 @@ struct Boot {
 #[tauri::command]
 fn bootstrap(state: tauri::State<Boot>) -> Boot {
     state.inner().clone()
+}
+
+#[tauri::command]
+async fn ctl(ctx: tauri::State<'_, Arc<api::ApiCtx>>, req: Value) -> Result<Value, String> {
+    api::dispatch(&ctx, req).await
 }
 
 fn spawn_open(path: &PathBuf) {
@@ -231,9 +237,52 @@ fn set_auto_start(
 }
 
 fn config_dir() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("dash-download")
+    launch::cfg_dir()
+}
+
+fn spawn_engine_events(app: tauri::AppHandle, engine: Engine) {
+    tauri::async_runtime::spawn(async move {
+        let mut ev = engine.subscribe();
+        let mut ev_t = engine.subscribe_torrents();
+        loop {
+            tokio::select! {
+                r = ev.recv() => {
+                    match r {
+                        Ok(e) => {
+                            let _ = app.emit("engine", &e);
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            if let (Ok(tasks), Ok(torrents)) = (engine.list(), engine.list_torrents()) {
+                                let _ = app.emit("engine", serde_json::json!({
+                                    "type": "snapshot",
+                                    "tasks": tasks,
+                                    "torrents": torrents,
+                                }));
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                r = ev_t.recv() => {
+                    match r {
+                        Ok(e) => {
+                            let _ = app.emit("engine", &e);
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            if let (Ok(tasks), Ok(torrents)) = (engine.list(), engine.list_torrents()) {
+                                let _ = app.emit("engine", serde_json::json!({
+                                    "type": "snapshot",
+                                    "tasks": tasks,
+                                    "torrents": torrents,
+                                }));
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+        }
+    });
 }
 
 fn show_main_window(app: &tauri::AppHandle) {
@@ -272,11 +321,9 @@ fn main() {
     let cfg_dir = config_dir();
     let _ = std::fs::create_dir_all(&cfg_dir);
     init_debug_log(&cfg_dir);
-    // just dev 和托盘正式版抢 41320; 占着时 UI 会连到旧进程, 窗口也像没起来
+    // just dev 和托盘正式版抢 ipc.sock; 占着时 UI 会连到旧进程, 窗口也像没起来
     if launch::api_up() {
-        eprintln!(
-            "127.0.0.1:{API_PORT} 已被占用. 退出托盘里的 Dash Download 后再跑 just dev."
-        );
+        eprintln!("Dash Download 已在运行. 退出托盘里的实例后再跑 just dev.");
         std::process::exit(1);
     }
     let user_prefs = match prefs::Store::load(&cfg_dir) {
@@ -297,8 +344,7 @@ fn main() {
         eprintln!("native host 注册失败: {e}");
     }
 
-    // 引擎与 API 跑在独立 tokio runtime 线程上;
-    // UI/扩展只通过 localhost API 访问引擎, tauri 主线程不碰引擎
+    // 引擎与私有 IPC 跑在独立 tokio runtime 线程上; tauri 主线程不碰引擎
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     let mut settings = snapshot.engine.clone();
     settings.default_dir = download_dir.to_string_lossy().into_owned();
@@ -317,20 +363,18 @@ fn main() {
         cfg_dir: cfg_dir.clone(),
         prefs: user_prefs.clone(),
     });
+    let ipc_ctx = api_ctx.clone();
     rt.spawn(async move {
-        if let Err(e) = api::serve(api_ctx, API_PORT).await {
-            eprintln!("API server 退出: {e}");
-        }
+        ipc::serve(ipc_ctx).await;
     });
     // runtime 生命周期与进程一致, 有意泄漏避免 drop 时杀掉下载任务
     std::mem::forget(rt);
 
     let boot = Boot {
-        port: API_PORT,
         default_dir: download_dir.to_string_lossy().into_owned(),
         version: env!("CARGO_PKG_VERSION").to_string(),
     };
-    let updater = updater::Updater::new(engine, user_prefs.clone());
+    let updater = updater::Updater::new(engine.clone(), user_prefs.clone());
     let start_hidden = std::env::args().any(|a| a == "--hidden");
 
     let builder = tauri::Builder::default();
@@ -355,8 +399,10 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(boot)
         .manage(updater)
+        .manage(api_ctx)
         .invoke_handler(tauri::generate_handler![
             bootstrap,
+            ctl,
             reveal,
             open_path,
             update_status,
@@ -368,6 +414,7 @@ fn main() {
         ])
         .setup({
             let app_slot = app_slot.clone();
+            let engine = engine.clone();
             move |app| {
             *app_slot.lock().unwrap() = Some(app.handle().clone());
             let auto = if snapshot.auto_start {
@@ -386,6 +433,7 @@ fn main() {
                 }
             }
             updater::spawn_loop(app.handle().clone());
+            spawn_engine_events(app.handle().clone(), engine.clone());
             let show = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出 Dash Download", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show, &quit])?;

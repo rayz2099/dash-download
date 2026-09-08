@@ -15,9 +15,9 @@ test("大文件接管", () => {
   assert.equal(shouldTakeover({
     url: "https://cdn.example/a.zip", fileSize: 2e6, mime: "application/zip",
   }), true);
-  assert.equal(shouldTakeover({ url: "blob:https://gemini.google.com/abc" }), true);
-  assert.equal(shouldTakeover({ url: "data:image/png;base64,AAAA" }), true);
-  assert.equal(shouldTakeover({ url: "blob:null/f1f1a92e-7623-4c61-938b-a5667fe04ebd" }), true);
+  assert.equal(shouldTakeover({ url: "blob:https://gemini.google.com/abc" }), false);
+  assert.equal(shouldTakeover({ url: "data:image/png;base64,AAAA" }), false);
+  assert.equal(shouldTakeover({ url: "blob:null/f1f1a92e-7623-4c61-938b-a5667fe04ebd" }), false);
 });
 
 test("体积未知不套阈值, 已知小于 1MB 不接管", () => {

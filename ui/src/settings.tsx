@@ -4,6 +4,7 @@ import type { Boot, EngineSettings, ProxyCfg, ProxyKind, ProxyProbe, UpdateStatu
 import { MAX_CONN } from "./api";
 import { fmtBytes } from "./util";
 import { DirPick, NumStep } from "./fields";
+import { t } from "./i18n";
 import { applyCheck, armFlash } from "./update-check";
 
 /** 探测默认打 Google, 因为多数代理场景就是为了出网. */
@@ -30,7 +31,7 @@ function fillProxy(p: ProxyCfg): ProxyCfg {
   };
 }
 
-/** 去掉 JS Error / reqwest http: 前缀, 状态行只留中文结论. */
+/** 去掉 JS Error / reqwest http: 前缀，状态行只保留简短结论。 */
 function errText(e: unknown): string {
   return String(e).replace(/^Error: /, "").replace(/^http: /, "");
 }
@@ -44,7 +45,7 @@ function ProbeBox(props: { ok: ProxyProbe | null; err: string }) {
     : `${props.ok!.status}  ${props.ok!.ms}ms\n${props.ok!.final_url}`;
   return (
     <div class={"probe-box" + (fail ? " err" : "")}>
-      <div class="probe-status">{fail ? "失败" : "成功"}</div>
+      <div class="probe-status">{fail ? t("失败", "Failed") : t("成功", "Success")}</div>
       <pre class="probe-out">{detail}</pre>
     </div>
   );
@@ -52,23 +53,24 @@ function ProbeBox(props: { ok: ProxyProbe | null; err: string }) {
 
 export function updatePhaseText(st: UpdateStatus): string {
   switch (st.phase) {
-    case "checking": return "正在检查更新…";
-    case "up_to_date": return "已是最新版本";
-    case "available": return `发现 v${st.latest}`;
+    case "checking": return t("正在检查更新…", "Checking for updates…");
+    case "up_to_date": return t("已是最新版本", "Up to date");
+    case "available": return t(`发现 v${st.latest}`, `v${st.latest} available`);
     case "downloading": {
       const tot = st.total ? ` ${fmtBytes(st.done)} / ${fmtBytes(st.total)}` : "";
-      return `正在下载 v${st.latest}${tot}`;
+      return t(`正在下载 v${st.latest}${tot}`, `Downloading v${st.latest}${tot}`);
     }
-    case "waiting": return "等待当前下载结束后安装并重启";
-    case "installing": return "正在安装, 即将重启";
-    case "error": return st.error || "检查更新失败";
-    default: return "启动后自动检查 GitHub Release";
+    case "waiting": return t("等待当前下载结束后安装并重启", "Waiting for downloads to finish");
+    case "installing": return t("正在安装，即将重启", "Installing, restarting soon");
+    case "error": return st.error || t("检查更新失败", "Update check failed");
+    default: return t("启动后自动检查 GitHub Release", "Checks GitHub Releases after launch");
   }
 }
 
-/** 自动检查行只留短句, 避免把整段 URL error 塞进 12px hint. */
+/** 空闲态不重复解释开关，只在状态变化时给反馈。 */
 function upHint(st: UpdateStatus): string {
-  if (st.phase === "error" || st.error) return "检查失败, 详见下方日志";
+  if (st.phase === "error" || st.error) return t("检查失败，详见下方日志", "Check failed; see log below");
+  if (st.phase === "idle") return "";
   return updatePhaseText(st);
 }
 
@@ -90,9 +92,9 @@ function UpdateLog(props: { up: UpdateStatus; ver: string }) {
   return (
     <div class="update-log">
       <div class="update-log-head">
-        <span>日志</span>
+        <span>{t("日志", "Log")}</span>
         <button class="btn" type="button"
-          onClick={() => { void navigator.clipboard.writeText(txt); }}>复制</button>
+          onClick={() => { void navigator.clipboard.writeText(txt); }}>{t("复制", "Copy")}</button>
       </div>
       <pre class="update-log-body">{txt}</pre>
     </div>
@@ -120,6 +122,7 @@ export function SettingsPage(props: {
   const [probeErr, setProbeErr] = useState("");
   const probeSeq = useRef(0);
   const flashTimer = useRef<ReturnType<typeof window.setTimeout> | null>(null);
+  const upText = up ? upHint(up) : t("读取中…", "Loading…");
 
   useEffect(() => { setEng(props.eng); }, [props.eng]);
 
@@ -210,7 +213,7 @@ export function SettingsPage(props: {
     const seq = ++probeSeq.current;
     setProbeOk(null);
     if (!url) {
-      setProbeErr("URL 不能为空");
+      setProbeErr(t("URL 不能为空", "URL is required"));
       return;
     }
     setProbeErr("");
@@ -230,12 +233,12 @@ export function SettingsPage(props: {
   return (
     <div class="settings-shell">
       <div class="settings-rail">
-        <div class="settings-rail-title">设置</div>
+        <div class="settings-rail-title">{t("设置", "Settings")}</div>
         {([
-          ["general", "通用"],
+          ["general", t("通用", "General")],
           ["p2p", "P2P"],
-          ["proxy", "代理"],
-          ["update", "更新"],
+          ["proxy", t("代理", "Proxy")],
+          ["update", t("更新", "Update")],
         ] as [Tab, string][]).map(([k, label]) => (
           <div class={"settings-rail-item" + (tab === k ? " on" : "")} onClick={() => setTab(k)}>
             {label}
@@ -246,36 +249,32 @@ export function SettingsPage(props: {
         <div class="page-inner">
           {tab === "general" && (
             <>
-              <h1 class="page-title">通用</h1>
-              <p class="page-sub">目录与并发立即生效. 连接数只作用于之后新建的任务.</p>
+              <h1 class="page-title">{t("通用", "General")}</h1>
               <div class="settings-card">
                 <div class="settings-row">
                   <div>
-                    <div class="settings-label">默认下载目录</div>
-                    <div class="settings-hint">未改时用系统 Downloads. 可浏览或手填路径</div>
+                    <div class="settings-label">{t("默认下载目录", "Default download folder")}</div>
                   </div>
                 </div>
                 <DirPick value={eng.default_dir} onChange={(dir) => persist({ ...props.eng, default_dir: dir })} />
                 <div class="settings-row">
                   <div>
-                    <div class="settings-label">同时下载</div>
-                    <div class="settings-hint">超出的任务进入队列, 最大 {MAX_CONN}</div>
+                    <div class="settings-label">{t("同时下载", "Concurrent downloads")}</div>
                   </div>
                   <NumStep value={eng.max_concurrent} min={1} max={MAX_CONN}
                     onChange={(n) => persist({ ...props.eng, max_concurrent: n })} />
                 </div>
                 <div class="settings-row">
                   <div>
-                    <div class="settings-label">每任务连接数</div>
-                    <div class="settings-hint">Range 分段上限. 小文件会按 1MB 自动减少段数</div>
+                    <div class="settings-label">{t("每任务连接数", "Connections per task")}</div>
+                    <div class="settings-hint">{t("仅影响新任务", "New tasks only")}</div>
                   </div>
                   <NumStep value={eng.max_segments} min={1} max={MAX_CONN}
                     onChange={(n) => persist({ ...props.eng, max_segments: n })} />
                 </div>
                 <div class="settings-row">
                   <div>
-                    <div class="settings-label">开机自启</div>
-                    <div class="settings-hint">登录后进托盘. Chrome 接管下载时才能拉起 app</div>
+                    <div class="settings-label">{t("开机自启", "Launch at login")}</div>
                   </div>
                   <button class={"toggle" + (autoStart ? " on" : "")}
                     onClick={() => {
@@ -289,37 +288,34 @@ export function SettingsPage(props: {
 
           {tab === "p2p" && (
             <>
-              <h1 class="page-title">P2P 网络</h1>
-              <p class="page-sub">默认关闭. 打开后才会监听端口、连 DHT / Tracker.</p>
+              <h1 class="page-title">{t("P2P 网络", "P2P Network")}</h1>
               <div class="settings-card">
                 <div class="settings-row">
                   <div>
-                    <div class="settings-label">启用 P2P</div>
-                    <div class="settings-hint">打开即监听 / DHT. 解析磁力可走 HTTP 缓存, 关着不对外</div>
+                    <div class="settings-label">{t("启用 P2P", "Enable P2P")}</div>
+                    <div class="settings-hint">{t("关闭时不监听端口", "No listening port when disabled")}</div>
                   </div>
                   <button class={"toggle" + (eng.p2p ? " on" : "")}
                     onClick={() => persist({ ...props.eng, p2p: !eng.p2p })} />
                 </div>
                 <div class="settings-row">
                   <div>
-                    <div class="settings-label">同时下载</div>
-                    <div class="settings-hint">只计正在拉数据的种子, 做种不占坑</div>
+                    <div class="settings-label">{t("同时下载", "Concurrent downloads")}</div>
                   </div>
                   <NumStep value={eng.max_bt_active || 3} min={1} max={MAX_CONN}
                     onChange={(n) => persist({ ...props.eng, max_bt_active: n })} />
                 </div>
                 <div class="settings-row">
                   <div>
-                    <div class="settings-label">做种上限</div>
-                    <div class="settings-hint">超出后暂停多余做种的上传</div>
+                    <div class="settings-label">{t("做种上限", "Seeding limit")}</div>
                   </div>
                   <NumStep value={eng.max_bt_seed || 10} min={1} max={MAX_CONN}
                     onChange={(n) => persist({ ...props.eng, max_bt_seed: n })} />
                 </div>
                 <div class="settings-row">
                   <div>
-                    <div class="settings-label">入站端口</div>
-                    <div class="settings-hint">改端口需重启 app. 当前 {eng.listen_port || "自动"}</div>
+                    <div class="settings-label">{t("入站端口", "Incoming port")}</div>
+                    <div class="settings-hint">{t("修改后重启", "Restart to apply")}</div>
                   </div>
                   <NumStep value={eng.listen_port || 0} min={0} max={65535}
                     onChange={(n) => persist({ ...props.eng, listen_port: n })} />
@@ -327,29 +323,28 @@ export function SettingsPage(props: {
                 <label class="settings-row">
                   <div>
                     <div class="settings-label">UPnP</div>
-                    <div class="settings-hint">给路由器映射入站端口, 加速 Peer 接入</div>
+                    <div class="settings-hint">{t("自动映射入站端口", "Map the incoming port automatically")}</div>
                   </div>
                   <input type="checkbox" checked={eng.upnp !== false}
                     onChange={(e) => persist({ ...props.eng, upnp: (e.target as HTMLInputElement).checked })} />
                 </label>
                 <label class="settings-row">
                   <div>
-                    <div class="settings-label">附加公共 Tracker</div>
-                    <div class="settings-hint">下载/做种附加 XIU2/ngosang. 磁力解析仍会注入; private=1 永不附加</div>
+                    <div class="settings-label">{t("附加公共 Tracker", "Add public trackers")}</div>
+                    <div class="settings-hint">{t("Private Torrent 不附加", "Not added to private torrents")}</div>
                   </div>
                   <input type="checkbox" checked={!!eng.extra_trackers}
                     onChange={(e) => persist({ ...props.eng, extra_trackers: (e.target as HTMLInputElement).checked })} />
                 </label>
                 <div class="settings-row">
                   <div>
-                    <div class="settings-label">磁力解析超时</div>
-                    <div class="settings-hint">HTTP 缓存 + DHT 共用. 超时即失败, 不进下载列表</div>
+                    <div class="settings-label">{t("磁力解析超时", "Magnet timeout")}</div>
                   </div>
                   <NumStep value={eng.resolve_secs || 30} min={5} max={300}
                     onChange={(n) => persist({ ...props.eng, resolve_secs: n })} />
                 </div>
                 {eng.bt_direct && (
-                  <div class="settings-hint">当前是 HTTP 代理, BT 已直连 (DHT/uTP 走不了 HTTP CONNECT)</div>
+                  <div class="settings-hint">{t("HTTP 代理下 BT 直连", "BT uses direct connections with an HTTP proxy")}</div>
                 )}
               </div>
             </>
@@ -357,14 +352,13 @@ export function SettingsPage(props: {
 
           {tab === "proxy" && (
             <>
-              <h1 class="page-title">代理</h1>
-              <p class="page-sub">只作用于新连接. 直连忽略环境变量, 无代理跟随 HTTP_PROXY</p>
+              <h1 class="page-title">{t("代理", "Proxy")}</h1>
               <div class="settings-card">
-                <div class="settings-label" style={{ marginBottom: 10 }}>类型</div>
+                <div class="settings-label" style={{ marginBottom: 10 }}>{t("类型", "Type")}</div>
                 <div class="radio-list">
                   {([
-                    ["direct", "直连"],
-                    ["no_proxy", "无代理"],
+                    ["direct", t("直连", "Direct")],
+                    ["no_proxy", t("无代理", "System proxy")],
                     ["http", "HTTP"],
                     ["socks5", "SOCKS5"],
                   ] as [ProxyKind, string][]).map(([k, label]) => (
@@ -379,7 +373,7 @@ export function SettingsPage(props: {
                   <>
                     <div class="proxy-grid">
                       <div class="field">
-                        <label>主机</label>
+                        <label>{t("主机", "Host")}</label>
                         <input type="text" value={eng.proxy.host} placeholder={DEF_HOST}
                           autoCapitalize="none" autoCorrect="off" autoComplete="off" spellcheck={false}
                           onInput={(e) => setEng({
@@ -391,7 +385,7 @@ export function SettingsPage(props: {
                           })} />
                       </div>
                       <div class="field">
-                        <label>端口</label>
+                        <label>{t("端口", "Port")}</label>
                         <input type="text" value={eng.proxy.port || ""} placeholder={eng.proxy.kind === "socks5" ? "1080" : "8080"}
                           onInput={(e) => {
                             const v = (e.target as HTMLInputElement).value.replace(/\D/g, "");
@@ -405,8 +399,7 @@ export function SettingsPage(props: {
                     </div>
                     <div class="settings-row">
                       <div>
-                        <div class="settings-label">代理认证</div>
-                        <div class="settings-hint">CONNECT 时带上账号</div>
+                        <div class="settings-label">{t("代理认证", "Authentication")}</div>
                       </div>
                       <button class={"toggle" + (eng.proxy.auth ? " on" : "")}
                         onClick={() => saveProxy({ ...eng.proxy, auth: !eng.proxy.auth })} />
@@ -414,7 +407,7 @@ export function SettingsPage(props: {
                     {eng.proxy.auth && (
                       <div class="proxy-grid">
                         <div class="field">
-                          <label>用户名</label>
+                          <label>{t("用户名", "Username")}</label>
                           <input type="text" value={eng.proxy.user}
                             onInput={(e) => setEng({
                               ...eng, proxy: { ...eng.proxy, user: (e.target as HTMLInputElement).value },
@@ -424,9 +417,9 @@ export function SettingsPage(props: {
                             })} />
                         </div>
                         <div class="field">
-                          <label>密码</label>
+                          <label>{t("密码", "Password")}</label>
                           <input type="password" value={eng.proxy.pass}
-                            placeholder={eng.proxy.pass_set ? "已保存" : ""}
+                            placeholder={eng.proxy.pass_set ? t("已保存", "Saved") : ""}
                             onInput={(e) => setEng({
                               ...eng, proxy: { ...eng.proxy, pass: (e.target as HTMLInputElement).value },
                             })}
@@ -440,8 +433,7 @@ export function SettingsPage(props: {
                 )}
                 <div class="settings-row">
                   <div>
-                    <div class="settings-label">测试代理</div>
-                    <div class="settings-hint">用当前填写发一次 GET, 不保存</div>
+                    <div class="settings-label">{t("测试代理", "Test proxy")}</div>
                   </div>
                 </div>
                 <div class="proxy-test-row">
@@ -452,7 +444,7 @@ export function SettingsPage(props: {
                   </div>
                   <button class="btn" type="button" disabled={probing}
                     onClick={() => { void runProbe(); }}>
-                    {probing ? "测试中…" : "测试"}
+                    {probing ? t("测试中…", "Testing…") : t("测试", "Test")}
                   </button>
                 </div>
                 <ProbeBox ok={probeOk} err={probeErr} />
@@ -462,13 +454,12 @@ export function SettingsPage(props: {
 
           {tab === "update" && (
             <>
-              <h1 class="page-title">更新</h1>
-              <p class="page-sub">查 GitHub Releases API, 验签后安装. 有任务在下时会等它结束再重启.</p>
+              <h1 class="page-title">{t("更新", "Update")}</h1>
               <div class="settings-card">
                 <div class="settings-row">
                   <div>
-                    <div class="settings-label">自动检查并安装</div>
-                    <div class="settings-hint">{up ? upHint(up) : "读取中…"}</div>
+                    <div class="settings-label">{t("自动检查并安装", "Check and install automatically")}</div>
+                    {upText && <div class="settings-hint">{upText}</div>}
                   </div>
                   <button class={"toggle" + (up?.auto_update ? " on" : "")}
                     disabled={!up}
@@ -479,8 +470,7 @@ export function SettingsPage(props: {
                 </div>
                 <div class="settings-row">
                   <div>
-                    <div class="settings-label">核心版本</div>
-                    <div class="settings-hint">扩展与 app 共用 localhost API, 无需配对令牌</div>
+                    <div class="settings-label">{t("核心版本", "Core version")}</div>
                   </div>
                   <div class="settings-actions">
                     <span class="mono-chip">v{props.boot.version}</span>
@@ -488,16 +478,9 @@ export function SettingsPage(props: {
                       disabled={busy || up?.phase === "checking" || up?.phase === "downloading"
                         || up?.phase === "waiting" || up?.phase === "installing"}
                       onClick={() => { void onCheck(); }}>
-                      {busy ? "检查中…" : "检查更新"}
+                      {busy ? t("检查中…", "Checking…") : t("检查更新", "Check for updates")}
                     </button>
                   </div>
-                </div>
-                <div class="settings-row">
-                  <div>
-                    <div class="settings-label">API</div>
-                    <div class="settings-hint">仅绑定回环地址. 扩展可经 native host 拉起本进程</div>
-                  </div>
-                  <span class="mono-chip">127.0.0.1:{props.boot.port}</span>
                 </div>
               </div>
               {flash && (
@@ -517,5 +500,3 @@ export function SettingsPage(props: {
     </div>
   );
 }
-
-

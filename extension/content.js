@@ -20,8 +20,17 @@ window.addEventListener("dd-read-ok", (e) => {
 });
 
 let port = null;
+/// 扩展被 Reload 后旧 isolated world 还活着; runtime.id 没了再 connect 会抛 Extension context invalidated.
+function extAlive() {
+  try { return Boolean(chrome.runtime && chrome.runtime.id); } catch (_) { return false; }
+}
 function connect() {
-  port = chrome.runtime.connect({ name: "dd-page" });
+  if (!extAlive()) return;
+  try {
+    port = chrome.runtime.connect({ name: "dd-page" });
+  } catch (_) {
+    return;
+  }
   while (pendingSeen.length) postPort({ op: "blob-seen", id: pendingSeen.shift() });
   port.onMessage.addListener((msg) => {
     if (msg.op !== "read-blob") return;
@@ -29,6 +38,7 @@ function connect() {
   });
   port.onDisconnect.addListener(() => {
     port = null;
+    if (!extAlive()) return;
     setTimeout(connect, 500);
   });
 }

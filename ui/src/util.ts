@@ -1,4 +1,5 @@
 import type { TaskInfo } from "./api";
+import { t } from "./i18n";
 
 const KB = 1024, MB = KB * 1024, GB = MB * 1024;
 
@@ -18,9 +19,12 @@ export function fmtSpeed(bps: number): string {
 export function fmtEtaBy(size: number | null, done: number, speed: number): string {
   if (!size || speed <= 0) return "—";
   const s = Math.ceil((size - done) / speed);
-  if (s < 60) return s + " 秒";
-  if (s < 3600) return Math.floor(s / 60) + " 分 " + (s % 60) + " 秒";
-  return Math.floor(s / 3600) + " 小时 " + Math.floor((s % 3600) / 60) + " 分";
+  if (s < 60) return t(`${s} 秒`, `${s} sec`);
+  if (s < 3600) return t(`${Math.floor(s / 60)} 分 ${s % 60} 秒`, `${Math.floor(s / 60)} min ${s % 60} sec`);
+  return t(
+    `${Math.floor(s / 3600)} 小时 ${Math.floor((s % 3600) / 60)} 分`,
+    `${Math.floor(s / 3600)} hr ${Math.floor((s % 3600) / 60)} min`,
+  );
 }
 
 export function fmtEta(t: TaskInfo): string {
@@ -38,7 +42,7 @@ export function fmtTime(ts: number | null): string {
   const today = new Date();
   const sameDay = d.toDateString() === today.toDateString();
   const hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-  if (sameDay) return `今天 ${hm}`;
+  if (sameDay) return t(`今天 ${hm}`, `Today ${hm}`);
   return `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
 }
 
@@ -65,24 +69,24 @@ export function fileType(name: string): FileType {
 }
 
 export const TYPE_LABEL: Record<FileType, string> = {
-  video: "视频",
-  audio: "音频",
-  image: "图片",
-  doc: "文档",
-  archive: "压缩包",
-  app: "软件",
-  other: "其他",
+  video: t("视频", "Video"),
+  audio: t("音频", "Audio"),
+  image: t("图片", "Images"),
+  doc: t("文档", "Documents"),
+  archive: t("压缩包", "Archives"),
+  app: t("软件", "Apps"),
+  other: t("其他", "Other"),
 };
 
 export const STATE_META: Record<string, { label: string; cls: string }> = {
-  queued: { label: "等待中", cls: "" },
-  probing: { label: "连接中", cls: "active" },
-  active: { label: "下载中", cls: "active" },
-  paused: { label: "已暂停", cls: "" },
-  completed: { label: "已完成", cls: "completed" },
-  failed: { label: "失败", cls: "failed" },
-  canceled: { label: "已取消", cls: "" },
-  resolving: { label: "解析中", cls: "active" },
-  awaiting_selection: { label: "待选文件", cls: "" },
-  seeding: { label: "做种中", cls: "completed" },
+  queued: { label: t("等待中", "Queued"), cls: "" },
+  probing: { label: t("连接中", "Connecting"), cls: "active" },
+  active: { label: t("下载中", "Downloading"), cls: "active" },
+  paused: { label: t("已暂停", "Paused"), cls: "" },
+  completed: { label: t("已完成", "Completed"), cls: "completed" },
+  failed: { label: t("失败", "Failed"), cls: "failed" },
+  canceled: { label: t("已取消", "Canceled"), cls: "" },
+  resolving: { label: t("解析中", "Resolving"), cls: "active" },
+  awaiting_selection: { label: t("待选文件", "Select files"), cls: "" },
+  seeding: { label: t("做种中", "Seeding"), cls: "completed" },
 };

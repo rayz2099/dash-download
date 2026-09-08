@@ -1,5 +1,7 @@
-// localhost API 客户端: UI 与扩展共用同一套 REST/WS (ADR 0003)
+// UI 控制面: invoke ctl, 事件走 tauri engine channel. 不再打 loopback HTTP.
+import { t } from "./i18n";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 
 export type TaskState =
@@ -114,7 +116,6 @@ export type EngineEvent =
   | { type: "resolve_failed"; id: number; source: string; error: string };
 
 export interface Boot {
-  port: number;
   default_dir: string;
   version: string;
 }
@@ -136,39 +137,25 @@ export async function init(): Promise<Boot> {
 }
 
 export function getBoot(): Boot {
-  if (!boot) throw new Error("boot 未初始化");
+  if (!boot) throw new Error(t("boot 未初始化", "Boot data is not initialized"));
   return boot;
 }
 
-async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const b = getBoot();
-  const resp = await fetch(`http://127.0.0.1:${b.port}${path}`, {
-    method,
-    headers: {
-      "x-dd-client": "ui",
-      ...(body !== undefined ? { "content-type": "application/json" } : {}),
-    },
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
-  if (!resp.ok) {
-    const err = await resp.json().catch(() => ({ error: resp.statusText }));
-    throw new Error((err as { error?: string }).error || `HTTP ${resp.status}`);
-  }
-  if (resp.status === 204) return undefined as T;
-  return resp.json() as Promise<T>;
+async function ctl<T>(op: string, extra: Record<string, unknown> = {}): Promise<T> {
+  return invoke<T>("ctl", { req: { op, ...extra } });
 }
 
-export const addTask = (r: AddTaskReq) => req<TaskInfo>("POST", "/api/tasks", r);
-export const pauseTask = (id: number) => req<void>("POST", `/api/tasks/${id}/pause`);
-export const resumeTask = (id: number) => req<void>("POST", `/api/tasks/${id}/resume`);
-export const cancelTask = (id: number) => req<void>("POST", `/api/tasks/${id}/cancel`);
-export const redownloadTask = (id: number) => req<void>("POST", `/api/tasks/${id}/redownload`);
+export const addTask = (r: AddTaskReq) => ctl<TaskInfo>("add_task", { ...r });
+export const pauseTask = (id: number) => ctl<void>("pause_task", { id });
+export const resumeTask = (id: number) => ctl<void>("resume_task", { id });
+export const cancelTask = (id: number) => ctl<void>("cancel_task", { id });
+export const redownloadTask = (id: number) => ctl<void>("redownload_task", { id });
 export const setConnections = (id: number, n: number) =>
-  req<void>("POST", `/api/tasks/${id}/connections`, { n });
+  ctl<void>("set_connections", { id, n });
 export const removeTask = (id: number, deleteFile = true) =>
-  req<void>("DELETE", `/api/tasks/${id}?delete_file=${deleteFile}`);
-export const pauseAll = () => req<void>("POST", "/api/pause-all");
-export const resumeAll = () => req<void>("POST", "/api/resume-all");
+  ctl<void>("remove_task", { id, delete_file: deleteFile });
+export const pauseAll = () => ctl<void>("pause_all");
+export const resumeAll = () => ctl<void>("resume_all");
 
 export const addTorrent = (r: {
   magnet?: string;
@@ -176,41 +163,37 @@ export const addTorrent = (r: {
   torrent_url?: string;
   dir?: string;
   headers?: [string, string][];
-}) => req<TorrentInfo>("POST", "/api/torrents", r);
-export const pauseTorrent = (id: number) => req<void>("POST", `/api/torrents/${id}/pause`);
-export const resumeTorrent = (id: number) => req<void>("POST", `/api/torrents/${id}/resume`);
+}) => ctl<TorrentInfo>("add_torrent", { ...r });
+export const pauseTorrent = (id: number) => ctl<void>("pause_torrent", { id });
+export const resumeTorrent = (id: number) => ctl<void>("resume_torrent", { id });
 export const selectTorrentFiles = (id: number, selected: number[]) =>
-  req<TorrentInfo>("PATCH", `/api/torrents/${id}/files`, { selected });
+  ctl<TorrentInfo>("select_files", { id, selected });
 export const removeTorrent = (id: number, deleteFile = true) =>
-  req<void>("DELETE", `/api/torrents/${id}?delete_file=${deleteFile}`);
+  ctl<void>("remove_torrent", { id, delete_file: deleteFile });
 export const revealFile = (path: string, fallback?: string) =>
   invoke("reveal", { path, fallback: fallback ?? null });
 export const openPath = (path: string, fallback?: string) =>
   invoke("open_path", { path, fallback: fallback ?? null });
 
-/// WS 事件流: 断线 2s 自动重连, 重连后服务端会重发快照对齐状态
+/// 引擎事件: 先拉快照再订 tauri event. 断线由进程生命周期决定, 不再重连 loopback WS.
 export function connectEvents(onEvent: (ev: EngineEvent) => void): () => void {
-  let ws: WebSocket | null = null;
   let closed = false;
-  const connect = () => {
-    if (closed) return;
-    const b = getBoot();
-    ws = new WebSocket(`ws://127.0.0.1:${b.port}/api/ws`);
-    ws.onmessage = (e) => {
-      try {
-        onEvent(JSON.parse(e.data as string) as EngineEvent);
-      } catch {
-        /* 忽略坏帧 */
-      }
-    };
-    ws.onclose = () => {
-      if (!closed) setTimeout(connect, 2000);
-    };
-  };
-  connect();
+  let unlisten: (() => void) | undefined;
+  void (async () => {
+    try {
+      const tasks = await ctl<TaskInfo[]>("list_tasks");
+      const torrents = await ctl<TorrentInfo[]>("list_torrents");
+      if (!closed) onEvent({ type: "snapshot", tasks, torrents });
+      unlisten = await listen<EngineEvent>("engine", (e) => {
+        if (!closed) onEvent(e.payload);
+      });
+    } catch {
+      /* bootstrap 失败由 init 表面 */
+    }
+  })();
   return () => {
     closed = true;
-    ws?.close();
+    unlisten?.();
   };
 }
 
@@ -266,9 +249,9 @@ export interface EngineSettings {
 
 export const MAX_CONN = 128;
 
-export const getSettings = () => req<EngineSettings>("GET", "/api/settings");
+export const getSettings = () => ctl<EngineSettings>("get_settings");
 export const putSettings = (s: EngineSettings) =>
-  req<EngineSettings>("PUT", "/api/settings", s);
+  ctl<EngineSettings>("put_settings", { ...s });
 
 /// 系统目录面板. 取消返回 null, 不要把空路径写进 prefs.
 export async function pickDir(current: string): Promise<string | null> {
@@ -284,4 +267,4 @@ export interface ProxyProbe {
 }
 
 export const testProxy = (url: string, proxy: ProxyCfg) =>
-  req<ProxyProbe>("POST", "/api/proxy-test", { url, proxy });
+  ctl<ProxyProbe>("test_proxy", { url, proxy });

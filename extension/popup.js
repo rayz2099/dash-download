@@ -1,7 +1,13 @@
-const API = "http://127.0.0.1:41320";
-const NATIVE = "dev.ray.dash_download";
+const NATIVE = "top.linran.dd";
 const DEFAULTS = { enabled: true, minBytes: 1024 * 1024, denyHosts: [] };
+const SITE_ORIGINS = ["http://*/*", "https://*/*"];
 const $ = (id) => document.getElementById(id);
+const msg = (key, subs) => chrome.i18n.getMessage(key, subs);
+
+document.documentElement.lang = chrome.i18n.getUILanguage().toLowerCase().startsWith("zh") ? "zh-CN" : "en";
+document.querySelectorAll("[data-i18n]").forEach((el) => {
+  el.textContent = msg(el.dataset.i18n);
+});
 
 const state = { ...DEFAULTS };
 
@@ -19,10 +25,10 @@ function parseDeny(text) {
 }
 
 async function ping() {
-  const resp = await fetch(API + "/api/ping");
-  const info = await resp.json();
+  const info = await chrome.runtime.sendNativeMessage(NATIVE, { op: "ping" });
+  if (!info || info.ok === false || !info.version) throw new Error(msg("ping_failed"));
   $("dot").classList.add("on");
-  $("status").textContent = "已连接 v" + info.version;
+  $("status").textContent = msg("connected", info.version);
   return true;
 }
 
@@ -31,7 +37,7 @@ async function checkHealth() {
     await ping();
     return;
   } catch (_) { /* 尝试拉起 */ }
-  $("status").textContent = "正在拉起 app…";
+  $("status").textContent = msg("starting_app");
   try {
     await chrome.runtime.sendNativeMessage(NATIVE, { op: "wake" });
     for (let i = 0; i < 40; i++) {
@@ -43,19 +49,36 @@ async function checkHealth() {
     }
   } catch (_) { /* native host 未注册 */ }
   $("dot").classList.remove("on");
-  $("status").textContent = "app 未运行";
+  $("status").textContent = msg("app_not_running");
 }
 
-chrome.storage.local.get(DEFAULTS, (cfg) => {
+chrome.storage.local.get(DEFAULTS, async (cfg) => {
   state.enabled = cfg.enabled;
   state.minBytes = cfg.minBytes;
   state.denyHosts = cfg.denyHosts;
+  if (state.enabled) {
+    const has = await chrome.permissions.contains({ origins: SITE_ORIGINS });
+    if (!has) {
+      const ok = await chrome.permissions.request({ origins: SITE_ORIGINS });
+      if (!ok) {
+        state.enabled = false;
+        chrome.storage.local.set({ enabled: false });
+      }
+    }
+  }
   renderToggle();
   renderRules();
 });
 
-$("toggle").addEventListener("click", () => {
-  state.enabled = !state.enabled;
+$("toggle").addEventListener("click", async () => {
+  if (!state.enabled) {
+    const ok = await chrome.permissions.request({ origins: SITE_ORIGINS });
+    if (!ok) return;
+    state.enabled = true;
+  } else {
+    state.enabled = false;
+    await chrome.permissions.remove({ origins: SITE_ORIGINS });
+  }
   chrome.storage.local.set({ enabled: state.enabled });
   renderToggle();
 });

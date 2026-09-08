@@ -15,8 +15,6 @@ serde.workspace = true
 serde_json.workspace = true
 url.workspace = true
 tauri = { version = "2", features = ["tray-icon"] }
-axum = { version = "0.8", features = ["ws"] }
-tower-http = { version = "0.6", features = ["cors"] }
 dirs = "6"
 base64 = "0.22"
 tauri-plugin-updater = "2"

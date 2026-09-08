@@ -4,6 +4,12 @@
   /// 与引擎 MAX_IMPORT_BYTES 对齐. JSON base64 约 4/3, app body 上限 32MB.
   const MAX_INLINE_BYTES = 24 * 1024 * 1024;
 
+  /// policy 同时跑在 Service Worker 与 Node 测试中，不能直接依赖 chrome 全局。
+  function policyMsg(zh, en) {
+    if (typeof chrome === "undefined" || !chrome.i18n) return en;
+    return chrome.i18n.getUILanguage().toLowerCase().startsWith("zh") ? zh : en;
+  }
+
   function isBlobLike(url) {
     return /^(blob|data|filesystem):/i.test(url || "");
   }
@@ -59,6 +65,7 @@
     if (/^(chrome|chrome-extension|about|edge|devtools|javascript|mailto):/i.test(url)) {
       return false;
     }
+    if (/^(blob|data|filesystem):/i.test(url)) return false;
     if (/^magnet:/i.test(url)) return true;
     const mime = ((item && item.mime) || "").split(";")[0].trim().toLowerCase();
     if (mime === "application/x-bittorrent" || /\.torrent(\?|#|$)/i.test(url)) return true;
@@ -74,7 +81,7 @@
 
   function decodeDataUrl(url) {
     const i = url.indexOf(",");
-    if (!/^data:/i.test(url) || i < 0) throw new Error("非法 data URL");
+    if (!/^data:/i.test(url) || i < 0) throw new Error(policyMsg("非法 data URL", "Invalid data URL"));
     const meta = url.slice(5, i);
     const data = url.slice(i + 1);
     const mime = (meta.split(";")[0] || "").trim();
@@ -86,7 +93,7 @@
       b64 = btoa(unescape(raw));
     }
     if (inlineTooLarge(Math.floor(b64.length * 3 / 4))) {
-      throw new Error("data URL 过大");
+      throw new Error(policyMsg("data URL 过大", "Data URL is too large"));
     }
     return { mime, b64 };
   }

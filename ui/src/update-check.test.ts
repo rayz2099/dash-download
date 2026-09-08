@@ -7,6 +7,7 @@ import {
   planCheck,
 } from "./update-check";
 import type { CheckSnap } from "./update-check";
+import { t } from "./i18n";
 
 function snap(phase: CheckSnap["phase"], latest: string | null = null): CheckSnap {
   return { phase, latest };
@@ -18,13 +19,13 @@ describe("planCheck", () => {
       kind: "latest",
       flash: LATEST_MSG,
     });
-    expect(LATEST_MSG).toBe("已经是最新版了");
+    expect(LATEST_MSG).toBe(t("已经是最新版了", "Already up to date"));
   });
 
   it("有新版本先问, 文案带版本号", () => {
     expect(planCheck(snap("available", "1.2.3"))).toEqual({
       kind: "ask",
-      prompt: "发现新版本 v1.2.3, 是否升级?",
+      prompt: t("发现新版本 v1.2.3, 是否升级?", "Version v1.2.3 is available. Update now?"),
     });
   });
 
@@ -32,7 +33,7 @@ describe("planCheck", () => {
     expect(planCheck(snap("available", null)).kind).toBe("ask");
     expect(planCheck(snap("available", null))).toEqual({
       kind: "ask",
-      prompt: "发现新版本, 是否升级?",
+      prompt: t("发现新版本, 是否升级?", "Version is available. Update now?"),
     });
   });
 
@@ -73,7 +74,9 @@ describe("applyCheck", () => {
       install,
       ask,
     });
-    expect(ask).toHaveBeenCalledWith("发现新版本 v2.0.0, 是否升级?");
+    expect(ask).toHaveBeenCalledWith(
+      t("发现新版本 v2.0.0, 是否升级?", "Version v2.0.0 is available. Update now?"),
+    );
     expect(install).toHaveBeenCalledTimes(1);
     expect(r).toEqual({ status: installed, flash: "" });
   });

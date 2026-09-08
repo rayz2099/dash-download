@@ -1,19 +1,29 @@
-// Takeover: 先把任务交给 app, 成功后再 abort Chrome. blob:null 必须从页面读字节.
+// Takeover: 先把任务交给 app, 成功后再 abort Chrome. 控制面只走 native messaging.
 importScripts("policy.js");
 
-const API = "http://127.0.0.1:41320";
-const NATIVE = "dev.ray.dash_download";
+const NATIVE = "top.linran.dd";
 const DEFAULTS = { enabled: true, minBytes: 1024 * 1024, denyHosts: [] };
+const msg = (key) => chrome.i18n.getMessage(key);
+/// 全站 host 不进必选权限；仅在接管开启时申请，关闭后立即收回。
+const SITE_ORIGINS = ["http://*/*", "https://*/*"];
 
 let cached = { ...DEFAULTS };
 const inflight = new Set();
 const sent = new Set();
-const pages = new Map(); // port -> { blobs: Set }
+let siteAccess = false;
+
+function refreshSiteAccess() {
+  return chrome.permissions.contains({ origins: SITE_ORIGINS }).then((ok) => {
+    siteAccess = ok;
+    return ok;
+  });
+}
 
 chrome.storage.local.get(DEFAULTS, (cfg) => {
   cached.enabled = cfg.enabled;
   cached.minBytes = cfg.minBytes;
   cached.denyHosts = cfg.denyHosts;
+  refreshSiteAccess();
 });
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;
@@ -22,62 +32,52 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (changes.denyHosts) cached.denyHosts = changes.denyHosts.newValue;
 });
 
+chrome.permissions.onAdded.addListener(() => {
+  refreshSiteAccess();
+});
+chrome.permissions.onRemoved.addListener(() => {
+  refreshSiteAccess().then((ok) => {
+    if (!ok && cached.enabled) {
+      cached.enabled = false;
+      chrome.storage.local.set({ enabled: false });
+    }
+  });
+});
+
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+function native(msg) {
+  return chrome.runtime.sendNativeMessage(NATIVE, msg);
+}
+
 async function ping() {
   try {
-    const resp = await fetch(API + "/api/ping");
-    if (!resp.ok) return null;
-    return await resp.json();
+    const info = await native({ op: "ping" });
+    if (!info || info.ok === false || !info.version) return null;
+    return info;
   } catch (_) {
     return null;
   }
 }
 
-async function registerOrigin() {
-  try {
-    await api("/api/ext-origin", {
-      method: "POST",
-      body: JSON.stringify({ origin: "chrome-extension://" + chrome.runtime.id + "/" }),
-    });
-  } catch (e) { console.warn("登记 origin 失败:", e); }
-}
-
-/// app 没跑时走 native host 拉起; 拉不起就不要 abort Chrome 下载.
+/// app 没跑时 native host 会拉 GUI 再把 ping 转进 ipc; 拉不起就不要 abort Chrome 下载.
 async function ensureApp() {
   let info = await ping();
-  if (info) {
-    registerOrigin();
-    return info;
-  }
-  try {
-    await chrome.runtime.sendNativeMessage(NATIVE, { op: "wake" });
-  } catch (_) {
-    return null;
-  }
+  if (info) return info;
   for (let i = 0; i < 40; i++) {
     await sleep(250);
     info = await ping();
-    if (info) {
-      registerOrigin();
-      return info;
-    }
+    if (info) return info;
   }
   return null;
 }
 
-async function api(path, opts) {
-  const resp = await fetch(API + path, {
-    ...opts,
-    headers: {
-      "x-dd-client": "ext",
-      ...(opts && opts.body ? { "content-type": "application/json" } : {}),
-    },
-  });
-  if (!resp.ok) throw new Error("HTTP " + resp.status);
-  return resp.json().catch(() => null);
+function nativeErr(r) {
+  if (!r) throw new Error(msg("native_no_reply"));
+  if (r.ok === false) throw new Error(r.error || msg("native_failed"));
+  return r;
 }
 
 async function buildHeaders(url, referrer) {
@@ -117,11 +117,8 @@ function notify(title, message) {
 }
 
 async function sendTorrent(payload) {
-  const t = await api("/api/torrents", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
-  api("/api/focus", { method: "POST" }).catch(() => {});
+  const t = nativeErr(await native({ op: "add_torrent", ...payload }));
+  native({ op: "focus" }).catch(() => {});
   return t;
 }
 
@@ -140,91 +137,14 @@ async function sendToApp(url, extra) {
   const body = { url, name: extra.filename, headers };
   if (extra.contentB64) {
     if (inlineTooLarge(Math.floor(extra.contentB64.length * 3 / 4))) {
-      throw new Error("导入内容过大");
+      throw new Error(msg("content_too_large"));
     }
     body.content_b64 = extra.contentB64;
     body.mime = extra.mime || "";
   }
-  const task = await api("/api/tasks", {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
-  api("/api/focus", { method: "POST" }).catch(() => {});
+  const task = nativeErr(await native({ op: "add_task", ...body }));
+  native({ op: "focus" }).catch(() => {});
   return task;
-}
-
-chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
-  if (!msg || msg.op !== "magnet" || !msg.url) return;
-  if (!cached.enabled) {
-    sendResponse(false);
-    return;
-  }
-  ensureApp().then((info) => {
-    if (!info) {
-      sendResponse(false);
-      return;
-    }
-    return sendTorrent({ magnet: msg.url }).then(() => sendResponse(true));
-  }).catch((e) => {
-    console.warn("磁力接管失败:", e);
-    notify("接管失败", e && e.message ? e.message : e);
-    sendResponse(false);
-  });
-  return true;
-});
-
-function readBlob(url) {
-  return new Promise((resolve, reject) => {
-    const id = blobId(url);
-    const targets = [];
-    for (const [port, st] of pages) {
-      if (st.blobs.has(id)) targets.push(port);
-    }
-    // 只问声明持有该 uuid 的页面. 广播会被其它 Tab 伪造 dd-read-ok 抢答.
-    if (targets.length === 0) {
-      reject(new Error("没有页面持有该 blob"));
-      return;
-    }
-    const req = String(Date.now()) + Math.random();
-    let left = targets.length;
-    let settled = false;
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      reject(new Error("无法读取 " + url));
-    }, 4000);
-    for (const port of targets) {
-      const onMsg = (msg) => {
-        if (msg.op !== "read-blob-ok" || msg.req !== req) return;
-        port.onMessage.removeListener(onMsg);
-        if (settled) return;
-        if (msg.error || !msg.b64) {
-          left -= 1;
-          if (left <= 0) {
-            settled = true;
-            clearTimeout(timer);
-            reject(new Error(msg.error || "blob 读取失败"));
-          }
-          return;
-        }
-        settled = true;
-        clearTimeout(timer);
-        resolve({ mime: msg.mime || "", b64: msg.b64 });
-      };
-      port.onMessage.addListener(onMsg);
-      try {
-        port.postMessage({ op: "read-blob", url, req });
-      } catch (_) {
-        left -= 1;
-        port.onMessage.removeListener(onMsg);
-      }
-    }
-    if (left <= 0 && !settled) {
-      settled = true;
-      clearTimeout(timer);
-      reject(new Error("页面端口不可用"));
-    }
-  });
 }
 
 async function captureUrl(url, extra) {
@@ -234,24 +154,15 @@ async function captureUrl(url, extra) {
     return sendToApp(url, { filename: extra.filename, contentB64: d.b64, mime: d.mime });
   }
   if (isBlobLike(url) && !extra.contentB64) {
-    const got = await readBlob(url);
-    return sendToApp(url, {
-      filename: extra.filename,
-      contentB64: got.b64,
-      mime: extra.mime || got.mime,
-    });
+    throw new Error(msg("blob_unsupported"));
   }
-  if (extra.contentB64) {
-    return sendToApp(url, extra);
-  }
-  extra.referrer = extra.referrer;
   return sendToApp(url, extra);
 }
 
 function takeover(item) {
   const url = item.finalUrl || item.url;
   const key = itemKey(url);
-  if (!cached.enabled) return;
+  if (!cached.enabled || !siteAccess) return;
   if (!shouldTakeover(item, cached)) return;
   if (sent.has(key)) {
     abortChrome(item.id);
@@ -273,19 +184,9 @@ function takeover(item) {
     abortChrome(item.id);
   }).catch((e) => {
     console.warn("接管失败:", e);
-    notify("接管失败", e && e.message ? e.message : e);
+    notify(msg("takeover_failed"), e && e.message ? e.message : e);
   });
 }
-
-chrome.runtime.onConnect.addListener((port) => {
-  if (port.name !== "dd-page") return;
-  const st = { blobs: new Set() };
-  pages.set(port, st);
-  port.onMessage.addListener((msg) => {
-    if (msg && msg.op === "blob-seen" && msg.id) st.blobs.add(String(msg.id));
-  });
-  port.onDisconnect.addListener(() => pages.delete(port));
-});
 
 chrome.downloads.onCreated.addListener((item) => takeover(item));
 
@@ -298,7 +199,7 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.create({
     id: "dd-download-link",
-    title: "使用 Dash Download 下载",
+    title: msg("context_download"),
     contexts: ["link"],
   });
 });
@@ -306,9 +207,10 @@ chrome.runtime.onInstalled.addListener(() => {
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (info.menuItemId !== "dd-download-link" || !info.linkUrl) return;
   try {
-    if (!(await ensureApp())) throw new Error("无法拉起 Dash Download");
+    if (!siteAccess) throw new Error(msg("site_access_required"));
+    if (!(await ensureApp())) throw new Error(msg("app_start_failed"));
     await captureUrl(info.linkUrl, { referrer: tab && tab.url });
   } catch (e) {
-    notify("发送失败", e && e.message ? e.message : e);
+    notify(msg("send_failed"), e && e.message ? e.message : e);
   }
 });

@@ -1,7 +1,8 @@
 import type { UpdateStatus } from "./api";
+import { t } from "./i18n";
 
 /** 手动检查后的瞬时提示, 不能写进长期 hint, 否则没法验「停留后消失」. */
-export const LATEST_MSG = "已经是最新版了";
+export const LATEST_MSG = t("已经是最新版了", "Already up to date");
 export const FLASH_MS = 3000;
 
 export type CheckSnap = Pick<UpdateStatus, "phase" | "latest">;
@@ -16,7 +17,10 @@ export function planCheck(st: CheckSnap): CheckPlan {
   if (st.phase === "up_to_date") return { kind: "latest", flash: LATEST_MSG };
   if (st.phase === "available") {
     const ver = st.latest ? ` v${st.latest}` : "";
-    return { kind: "ask", prompt: `发现新版本${ver}, 是否升级?` };
+    return {
+      kind: "ask",
+      prompt: t(`发现新版本${ver}, 是否升级?`, `Version${ver} is available. Update now?`),
+    };
   }
   return { kind: "none" };
 }

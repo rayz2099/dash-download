@@ -1,7 +1,9 @@
 //! 用 GitHub Releases API 发现版本和带 .sig 的安装包, 再交给 tauri-plugin-updater 验签安装.
 //! 有正在跑的 Task 时等到空闲再 install/restart, 避免截断 pwrite.
 
-use crate::gh_update::{GH_LATEST, MANIFEST_URL};
+use crate::gh_update::GH_LATEST;
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use crate::prefs;
 use dd_core::Engine;
 use serde::Serialize;
@@ -144,7 +146,10 @@ impl Updater {
         may_install: bool,
         force_install: bool,
     ) -> Result<(), String> {
-        let endpoint = Url::parse(MANIFEST_URL).map_err(|e| e.to_string())?;
+        // plugin 只认 HTTP URL; 清单在进程内拼好后用短暂 loopback 喂给它, 不常驻 41320.
+        let body = crate::gh_update::tauri_manifest().await?;
+        let port = serve_manifest_once(&body.to_string())?;
+        let endpoint = Url::parse(&format!("http://127.0.0.1:{port}/")).map_err(|e| e.to_string())?;
         let update = app
             .updater_builder()
             .endpoints(vec![endpoint])
@@ -216,9 +221,31 @@ fn debug_manual_phase(may_install: bool) -> Option<Phase> {
     }
 }
 
-/// 清单由本机 /api/updater-manifest 现查 GitHub API 拼出; 原文留给设置页复制.
+/// 清单由本机现查 GitHub API 拼出; 原文留给设置页复制.
 fn explain_check(raw: String) -> String {
     format!("GitHub Releases API ({GH_LATEST}): {raw}")
+}
+
+fn serve_manifest_once(body: &str) -> Result<u16, String> {
+    let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+    listener
+        .set_nonblocking(false)
+        .map_err(|e| e.to_string())?;
+    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+    let body = body.to_string();
+    std::thread::spawn(move || {
+        if let Ok((mut s, _)) = listener.accept() {
+            let mut buf = [0u8; 2048];
+            let _ = s.read(&mut buf);
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = s.write_all(resp.as_bytes());
+        }
+    });
+    Ok(port)
 }
 
 pub fn spawn_loop(app: AppHandle) {

@@ -1,21 +1,13 @@
-//! localhost REST + WS API: Chrome 扩展与 webview UI 共用的唯一入口 (ADR 0003).
-//! 仅绑定 127.0.0.1. 无配对 token: 浏览器 CSRF 靠 CORS 源白名单 + 自定义头 `x-dd-client`
-//! 强制预检; WS 校验 Origin. 对齐 NDM "app 在跑就能接管" 的交互.
+//! 进程内控制面: UI invoke 与 native-host IPC 共用 dispatch.
+//! 不再 bind TCP. 浏览器 CSRF 面随 41320 一起消失.
 
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{DefaultBodyLimit, Path, Query, State};
-use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
-use axum::middleware::{self, Next};
-use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
-use axum::{Json, Router};
+use crate::launch;
 use dd_core::{AddTaskOptions, CoreError, Engine, EngineSettings, ProxyCfg, RequestContext};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
-use tower_http::cors::{AllowOrigin, CorsLayer};
 use tauri::Manager;
 
 pub struct ApiCtx {
@@ -26,238 +18,33 @@ pub struct ApiCtx {
     pub prefs: crate::prefs::Store,
 }
 
-struct ApiError(dd_core::CoreError);
-
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        let code = match &self.0 {
-            dd_core::CoreError::NotFound(_) => StatusCode::NOT_FOUND,
-            dd_core::CoreError::Other(_) => StatusCode::BAD_REQUEST,
-            _ => StatusCode::INTERNAL_SERVER_ERROR,
-        };
-        (code, Json(json!({ "error": self.0.to_string() }))).into_response()
-    }
+fn err(e: impl ToString) -> String {
+    e.to_string()
 }
 
-impl From<dd_core::CoreError> for ApiError {
-    fn from(e: dd_core::CoreError) -> Self {
-        ApiError(e)
-    }
+fn core(e: CoreError) -> String {
+    e.to_string()
 }
 
-pub async fn serve(ctx: Arc<ApiCtx>, port: u16) -> std::io::Result<()> {
-    let cors = CorsLayer::new()
-        .allow_origin(AllowOrigin::predicate(|origin, _req| origin_ok(origin)))
-        .allow_methods([
-            Method::GET,
-            Method::POST,
-            Method::PUT,
-            Method::PATCH,
-            Method::DELETE,
-            Method::OPTIONS,
-        ])
-        .allow_headers([
-            header::CONTENT_TYPE,
-            HeaderName::from_static("x-dd-client"),
-        ]);
-
-    let authed = Router::new()
-        .route("/api/tasks", get(list_tasks).post(add_task))
-        .route("/api/tasks/{id}/pause", post(pause_task))
-        .route("/api/tasks/{id}/resume", post(resume_task))
-        .route("/api/tasks/{id}/cancel", post(cancel_task))
-        .route("/api/tasks/{id}/redownload", post(redownload_task))
-        .route("/api/tasks/{id}/connections", post(set_connections))
-        .route("/api/tasks/{id}", delete(remove_task))
-        .route("/api/pause-all", post(pause_all))
-        .route("/api/resume-all", post(resume_all))
-        .route("/api/settings", get(get_settings).put(put_settings))
-        .route("/api/proxy-test", post(test_proxy))
-        .route("/api/focus", post(focus_window))
-        .route("/api/ext-origin", post(ext_origin))
-        .route("/api/torrents", get(list_torrents).post(add_torrent))
-        .route("/api/torrents/{id}/pause", post(pause_torrent))
-        .route("/api/torrents/{id}/resume", post(resume_torrent))
-        .route("/api/torrents/{id}/files", axum::routing::patch(select_files))
-        .route("/api/torrents/{id}", delete(remove_torrent))
-        // blob 导入走 JSON base64, 默认 2MB 不够盖住页面生成的图
-        .layer(DefaultBodyLimit::max(32 * 1024 * 1024))
-        .layer(middleware::from_fn(check_client));
-
-    let app = Router::new()
-        // ping 不要求自定义头: 扩展 popup 健康检查
-        .route("/api/ping", get(ping))
-        // Tauri updater 用 reqwest 拉清单, 不带 x-dd-client
-        .route("/api/updater-manifest", get(updater_manifest))
-        // WS 无法带自定义 header, 只在 handler 里校验 Origin
-        .route("/api/ws", get(ws_handler))
-        .merge(authed)
-        .layer(cors)
-        .with_state(ctx);
-
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
-    axum::serve(listener, app).await
+fn need_i64(req: &Value, k: &str) -> Result<i64, String> {
+    req.get(k)
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| format!("缺少 {k}"))
 }
 
-/// 允许的浏览器 Origin: 本机 webview / vite / 本扩展 (manifest.key 算出的稳定 ID).
-/// 其它 chrome-extension:// 一律拒绝, 避免任意扩展读代理密码或写任务.
-fn origin_ok(origin: &HeaderValue) -> bool {
-    let Ok(s) = origin.to_str() else {
-        return false;
-    };
-    crate::launch::is_our_ext_origin(s)
-        || s == "http://localhost:5173"
-        || s == "http://127.0.0.1:5173"
-        || s == "https://tauri.localhost"
-        || s == "http://tauri.localhost"
-        || s == "tauri://localhost"
+fn ok() -> Value {
+    json!({ "ok": true })
 }
 
-fn origin_allowed(headers: &HeaderMap) -> bool {
-    match headers.get(header::ORIGIN) {
-        // curl / 本机工具不带 Origin, 放行; 浏览器跨站请求总会带
-        None => true,
-        Some(v) => origin_ok(v),
-    }
-}
-
-/// 控制面: Origin 白名单 + 强制 `x-dd-client`, 让浏览器无法发 simple request CSRF.
-async fn check_client(headers: HeaderMap, req: axum::extract::Request, next: Next) -> Response {
-    if !origin_allowed(&headers) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({ "error": "origin 不允许" })),
-        )
-            .into_response();
-    }
-    let client_ok = headers
-        .get("x-dd-client")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| !v.is_empty())
-        .unwrap_or(false);
-    if !client_ok {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": "缺少 x-dd-client" })),
-        )
-            .into_response();
-    }
-    next.run(req).await
-}
-
-async fn ping(State(ctx): State<Arc<ApiCtx>>) -> impl IntoResponse {
-    Json(json!({
-        "name": "dash-download",
-        "version": env!("CARGO_PKG_VERSION"),
-        "p2p": ctx.engine.settings().p2p,
-    }))
-}
-
-/// 给 tauri-plugin-updater: 现查 GitHub API, 把 asset+.sig 拼成它要的静态清单.
-async fn updater_manifest() -> Response {
-    match crate::gh_update::tauri_manifest().await {
-        Ok(v) => Json(v).into_response(),
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({ "error": e })),
-        )
-            .into_response(),
-    }
-}
-
-async fn list_tasks(State(ctx): State<Arc<ApiCtx>>) -> Result<Response, ApiError> {
-    Ok(Json(ctx.engine.list()?).into_response())
-}
-
-#[derive(Deserialize)]
-struct AddReq {
-    url: String,
-    dir: Option<String>,
-    name: Option<String>,
-    segments: Option<u32>,
-    #[serde(default)]
-    queue_only: bool,
-    #[serde(default)]
-    headers: Vec<(String, String)>,
-    /// 页面 blob/data 已在扩展里读成字节, 引擎不再 HTTP 拉
-    #[serde(default)]
-    content_b64: Option<String>,
-    #[serde(default)]
-    mime: Option<String>,
-}
-
-async fn add_task(
-    State(ctx): State<Arc<ApiCtx>>,
-    Json(req): Json<AddReq>,
-) -> Result<Response, ApiError> {
-    let task = if let Some(b64) = req.content_b64 {
-        let bytes = STANDARD
-            .decode(b64.trim())
-            .map_err(|e| ApiError(dd_core::CoreError::Other(format!("content_b64 非法: {e}"))))?;
-        ctx.engine.import_bytes(&req.url, req.name, req.mime, &bytes)?
-    } else {
-        let opts = AddTaskOptions {
-            dir: req.dir,
-            name: req.name,
-            segments: req.segments,
-            queue_only: req.queue_only,
-            ctx: RequestContext { headers: req.headers },
-        };
-        ctx.engine.add(&req.url, opts)?
-    };
-    show_main(&ctx);
-    Ok(Json(task).into_response())
-}
-
-async fn pause_task(
-    State(ctx): State<Arc<ApiCtx>>,
-    Path(id): Path<i64>,
-) -> Result<Response, ApiError> {
-    ctx.engine.pause(id)?;
-    Ok(StatusCode::NO_CONTENT.into_response())
-}
-
-async fn resume_task(
-    State(ctx): State<Arc<ApiCtx>>,
-    Path(id): Path<i64>,
-) -> Result<Response, ApiError> {
-    ctx.engine.resume(id)?;
-    Ok(StatusCode::NO_CONTENT.into_response())
-}
-
-async fn cancel_task(
-    State(ctx): State<Arc<ApiCtx>>,
-    Path(id): Path<i64>,
-) -> Result<Response, ApiError> {
-    ctx.engine.cancel(id)?;
-    Ok(StatusCode::NO_CONTENT.into_response())
-}
-
-async fn redownload_task(
-    State(ctx): State<Arc<ApiCtx>>,
-    Path(id): Path<i64>,
-) -> Result<Response, ApiError> {
-    ctx.engine.redownload(id)?;
-    Ok(StatusCode::NO_CONTENT.into_response())
-}
-
-#[derive(Deserialize)]
-struct ConnReq {
-    n: u32,
-}
-
-async fn set_connections(
-    State(ctx): State<Arc<ApiCtx>>,
-    Path(id): Path<i64>,
-    Json(req): Json<ConnReq>,
-) -> Result<Response, ApiError> {
-    ctx.engine.set_connections(id, req.n)?;
-    Ok(StatusCode::NO_CONTENT.into_response())
-}
-
-async fn focus_window(State(ctx): State<Arc<ApiCtx>>) -> Response {
-    show_main(&ctx);
-    StatusCode::NO_CONTENT.into_response()
+/// GET 不回传明文密码, 只带 pass_set 让设置页知道已保存过.
+fn settings_json(s: EngineSettings) -> Value {
+    let pass_set = !s.proxy.pass.is_empty();
+    let mut s = s;
+    s.proxy.pass.clear();
+    let mut v = serde_json::to_value(&s).expect("settings 可序列化");
+    v["proxy"]["pass_set"] = json!(pass_set);
+    v["bt_direct"] = json!(s.bt_direct());
+    v
 }
 
 fn show_main(ctx: &ApiCtx) {
@@ -272,167 +59,19 @@ fn show_main(ctx: &ApiCtx) {
 }
 
 #[derive(Deserialize)]
-struct RemoveQuery {
-    #[serde(default)]
-    delete_file: bool,
-}
-
-async fn remove_task(
-    State(ctx): State<Arc<ApiCtx>>,
-    Path(id): Path<i64>,
-    Query(q): Query<RemoveQuery>,
-) -> Result<Response, ApiError> {
-    ctx.engine.remove(id, q.delete_file)?;
-    Ok(StatusCode::NO_CONTENT.into_response())
-}
-
-
-async fn get_settings(State(ctx): State<Arc<ApiCtx>>) -> Json<Value> {
-    settings_json(ctx.engine.settings())
-}
-
-/// GET 不回传明文密码, 只带 pass_set 让设置页知道已保存过.
-fn settings_json(s: EngineSettings) -> Json<Value> {
-    let pass_set = !s.proxy.pass.is_empty();
-    let mut s = s;
-    s.proxy.pass.clear();
-    let mut v = serde_json::to_value(&s).expect("settings 可序列化");
-    v["proxy"]["pass_set"] = json!(pass_set);
-    v["bt_direct"] = json!(s.bt_direct());
-    Json(v)
-}
-
-/// 写 prefs.json 与热更新引擎必须同一次成功.
-/// 先改内存再落盘; 落盘失败要把引擎滚回去, 否则 API 报错但下载已走新代理.
-async fn put_settings(
-    State(ctx): State<Arc<ApiCtx>>,
-    Json(mut req): Json<EngineSettings>,
-) -> Result<Response, ApiError> {
-    let prev = ctx.engine.settings();
-    // 空密码表示沿用已存值, 避免设置页改目录时把代理密码写成空
-    if req.proxy.pass.is_empty() {
-        req.proxy.pass = prev.proxy.pass.clone();
-    }
-    let applied = ctx.engine.apply_settings(req)?;
-    if let Err(e) = ctx.prefs.patch(|p| p.apply_engine(&applied)) {
-        ctx.engine
-            .apply_settings(prev)
-            .map_err(|rb| ApiError(CoreError::Other(format!("写盘失败 ({e}) 且回滚失败: {rb}"))))?;
-        return Err(ApiError(CoreError::Other(e)));
-    }
-    ctx.engine.pump_queue();
-    Ok(settings_json(applied).into_response())
-}
-
-
-#[derive(Deserialize)]
-struct ProxyTestReq {
+struct AddReq {
     url: String,
-    proxy: ProxyCfg,
-}
-
-async fn test_proxy(
-    State(ctx): State<Arc<ApiCtx>>,
-    Json(mut req): Json<ProxyTestReq>,
-) -> Result<Response, ApiError> {
-    // GET 已抹掉明文; 测试时没改密码就用已存的, 否则已开认证的代理会假失败
-    if req.proxy.pass.is_empty() {
-        req.proxy.pass = ctx.engine.settings().proxy.pass;
-    }
-    let r = ctx.engine.probe_url(&req.proxy, &req.url).await?;
-    Ok(Json(r).into_response())
-}
-
-async fn pause_all(State(ctx): State<Arc<ApiCtx>>) -> Result<Response, ApiError> {
-    ctx.engine.pause_all()?;
-    Ok(StatusCode::NO_CONTENT.into_response())
-}
-
-async fn resume_all(State(ctx): State<Arc<ApiCtx>>) -> Result<Response, ApiError> {
-    ctx.engine.resume_all()?;
-    Ok(StatusCode::NO_CONTENT.into_response())
-}
-
-async fn ws_handler(
-    State(ctx): State<Arc<ApiCtx>>,
-    headers: HeaderMap,
-    upgrade: WebSocketUpgrade,
-) -> Response {
-    if !origin_allowed(&headers) {
-        return (StatusCode::FORBIDDEN, "origin 不允许").into_response();
-    }
-    upgrade.on_upgrade(move |socket| ws_loop(socket, ctx))
-}
-
-async fn send_snapshot(socket: &mut WebSocket, ctx: &ApiCtx) -> bool {
-    let msg = match (ctx.engine.list(), ctx.engine.list_torrents()) {
-        (Ok(tasks), Ok(torrents)) => json!({ "type": "snapshot", "tasks": tasks, "torrents": torrents }),
-        (Err(e), _) | (_, Err(e)) => json!({ "type": "error", "error": e.to_string() }),
-    };
-    socket.send(Message::text(msg.to_string())).await.is_ok()
-}
-
-/// WS 推送: 连接时先发全量快照, 之后转发引擎事件流.
-/// 客户端断线由 send 失败自然终止循环, 无需心跳 (localhost 不存在中间设备超时)
-async fn ws_loop(mut socket: WebSocket, ctx: Arc<ApiCtx>) {
-    let mut events = ctx.engine.subscribe();
-    let mut events_t = ctx.engine.subscribe_torrents();
-    if !send_snapshot(&mut socket, &ctx).await {
-        return;
-    }
-    loop {
-        tokio::select! {
-            ev = events.recv() => {
-                let ev = match ev {
-                    Ok(ev) => ev,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        if send_snapshot(&mut socket, &ctx).await { continue; } else { return; }
-                    }
-                    Err(_) => return,
-                };
-                let payload = serde_json::to_string(&ev).unwrap_or_default();
-                if socket.send(Message::text(payload)).await.is_err() {
-                    return;
-                }
-            }
-            ev = events_t.recv() => {
-                let ev = match ev {
-                    Ok(ev) => ev,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        if send_snapshot(&mut socket, &ctx).await { continue; } else { return; }
-                    }
-                    Err(_) => return,
-                };
-                let payload = serde_json::to_string(&ev).unwrap_or_default();
-                if socket.send(Message::text(payload)).await.is_err() {
-                    return;
-                }
-            }
-            msg = socket.recv() => {
-                match msg {
-                    None | Some(Err(_)) => return,
-                    Some(Ok(_)) => {} // 客户端消息忽略, 控制面走 REST
-                }
-            }
-        }
-    }
-}
-
-#[derive(Deserialize)]
-struct ExtOrigin {
-    origin: String,
-}
-
-/// 扩展上报自身 origin, 写入 native host 白名单, 下次没跑 app 时仍能被拉起.
-async fn ext_origin(State(ctx): State<Arc<ApiCtx>>, Json(req): Json<ExtOrigin>) -> Result<Response, ApiError> {
-    crate::launch::remember_origin(&ctx.cfg_dir, &req.origin).map_err(|e| {
-        dd_core::CoreError::Other(e)
-    })?;
-    Ok(Json(json!({ "ok": true })).into_response())
-}
-
-async fn list_torrents(State(ctx): State<Arc<ApiCtx>>) -> Result<Response, ApiError> {
-    Ok(Json(ctx.engine.list_torrents()?).into_response())
+    dir: Option<String>,
+    name: Option<String>,
+    segments: Option<u32>,
+    #[serde(default)]
+    queue_only: bool,
+    #[serde(default)]
+    headers: Vec<(String, String)>,
+    #[serde(default)]
+    content_b64: Option<String>,
+    #[serde(default)]
+    mime: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -445,63 +84,202 @@ struct AddTorrentReq {
     headers: Vec<(String, String)>,
 }
 
-async fn add_torrent(
-    State(ctx): State<Arc<ApiCtx>>,
-    Json(req): Json<AddTorrentReq>,
-) -> Result<Response, ApiError> {
+#[derive(Deserialize)]
+struct ProxyTestReq {
+    url: String,
+    proxy: ProxyCfg,
+}
+
+async fn add_task(ctx: &ApiCtx, req: AddReq) -> Result<Value, String> {
+    let task = if let Some(b64) = req.content_b64 {
+        let bytes = STANDARD
+            .decode(b64.trim())
+            .map_err(|e| format!("content_b64 非法: {e}"))?;
+        ctx.engine
+            .import_bytes(&req.url, req.name, req.mime, &bytes)
+            .map_err(core)?
+    } else {
+        let opts = AddTaskOptions {
+            dir: req.dir,
+            name: req.name,
+            segments: req.segments,
+            queue_only: req.queue_only,
+            ctx: RequestContext {
+                headers: req.headers,
+            },
+        };
+        ctx.engine.add(&req.url, opts).map_err(core)?
+    };
+    show_main(ctx);
+    serde_json::to_value(task).map_err(err)
+}
+
+async fn add_torrent(ctx: &ApiCtx, req: AddTorrentReq) -> Result<Value, String> {
     let t = if let Some(m) = req.magnet.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        ctx.engine.add_magnet(m, req.dir)?
+        ctx.engine.add_magnet(m, req.dir).map_err(core)?
     } else if let Some(b64) = req.torrent_b64.as_deref() {
         let bytes = STANDARD
             .decode(b64.trim())
-            .map_err(|e| ApiError(CoreError::Other(format!("torrent_b64 非法: {e}"))))?;
-        ctx.engine.add_torrent_bytes(&bytes, "torrent", req.dir)?
-    } else if let Some(url) = req.torrent_url.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        let bytes = ctx.engine.fetch_torrent_url(url, &req.headers).await?;
-        ctx.engine.add_torrent_bytes(&bytes, url, req.dir)?
+            .map_err(|e| format!("torrent_b64 非法: {e}"))?;
+        ctx.engine
+            .add_torrent_bytes(&bytes, "torrent", req.dir)
+            .map_err(core)?
+    } else if let Some(url) = req
+        .torrent_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let bytes = ctx
+            .engine
+            .fetch_torrent_url(url, &req.headers)
+            .await
+            .map_err(core)?;
+        ctx.engine
+            .add_torrent_bytes(&bytes, url, req.dir)
+            .map_err(core)?
     } else {
-        return Err(ApiError(CoreError::Other(
-            "需要 magnet / torrent_b64 / torrent_url".into(),
-        )));
+        return Err("需要 magnet / torrent_b64 / torrent_url".into());
     };
-    show_main(&ctx);
-    Ok(Json(t).into_response())
+    show_main(ctx);
+    serde_json::to_value(t).map_err(err)
 }
 
-async fn pause_torrent(
-    State(ctx): State<Arc<ApiCtx>>,
-    Path(id): Path<i64>,
-) -> Result<Response, ApiError> {
-    ctx.engine.pause_torrent(id)?;
-    Ok(StatusCode::NO_CONTENT.into_response())
+async fn put_settings(ctx: &ApiCtx, mut req: EngineSettings) -> Result<Value, String> {
+    let prev = ctx.engine.settings();
+    if req.proxy.pass.is_empty() {
+        req.proxy.pass = prev.proxy.pass.clone();
+    }
+    let applied = ctx.engine.apply_settings(req).map_err(core)?;
+    if let Err(e) = ctx.prefs.patch(|p| p.apply_engine(&applied)) {
+        ctx.engine.apply_settings(prev).map_err(|rb| {
+            format!("写盘失败 ({e}) 且回滚失败: {rb}")
+        })?;
+        return Err(e);
+    }
+    ctx.engine.pump_queue();
+    Ok(settings_json(applied))
 }
 
-async fn resume_torrent(
-    State(ctx): State<Arc<ApiCtx>>,
-    Path(id): Path<i64>,
-) -> Result<Response, ApiError> {
-    ctx.engine.resume_torrent(id)?;
-    Ok(StatusCode::NO_CONTENT.into_response())
-}
-
-#[derive(Deserialize)]
-struct SelectReq {
-    selected: Vec<u32>,
-}
-
-async fn select_files(
-    State(ctx): State<Arc<ApiCtx>>,
-    Path(id): Path<i64>,
-    Json(req): Json<SelectReq>,
-) -> Result<Response, ApiError> {
-    Ok(Json(ctx.engine.select_torrent_files(id, req.selected)?).into_response())
-}
-
-async fn remove_torrent(
-    State(ctx): State<Arc<ApiCtx>>,
-    Path(id): Path<i64>,
-    Query(q): Query<RemoveQuery>,
-) -> Result<Response, ApiError> {
-    ctx.engine.remove_torrent(id, q.delete_file).await?;
-    Ok(StatusCode::NO_CONTENT.into_response())
+/// 扩展与 UI 共用的 op 分发. 未知 op 直接失败, 不静默吞.
+pub async fn dispatch(ctx: &ApiCtx, req: Value) -> Result<Value, String> {
+    let op = req.get("op").and_then(|v| v.as_str()).ok_or("缺少 op")?;
+    match op {
+        "ping" | "wake" => Ok(json!({
+            "ok": true,
+            "name": "dash-download",
+            "version": env!("CARGO_PKG_VERSION"),
+            "p2p": ctx.engine.settings().p2p,
+        })),
+        "focus" => {
+            show_main(ctx);
+            Ok(ok())
+        }
+        "list_tasks" => serde_json::to_value(ctx.engine.list().map_err(core)?).map_err(err),
+        "add_task" => {
+            let body: AddReq = serde_json::from_value(req).map_err(err)?;
+            add_task(ctx, body).await
+        }
+        "pause_task" => {
+            ctx.engine.pause(need_i64(&req, "id")?).map_err(core)?;
+            Ok(ok())
+        }
+        "resume_task" => {
+            ctx.engine.resume(need_i64(&req, "id")?).map_err(core)?;
+            Ok(ok())
+        }
+        "cancel_task" => {
+            ctx.engine.cancel(need_i64(&req, "id")?).map_err(core)?;
+            Ok(ok())
+        }
+        "redownload_task" => {
+            ctx.engine.redownload(need_i64(&req, "id")?).map_err(core)?;
+            Ok(ok())
+        }
+        "set_connections" => {
+            let id = need_i64(&req, "id")?;
+            let n = req.get("n").and_then(|v| v.as_u64()).ok_or("缺少 n")? as u32;
+            ctx.engine.set_connections(id, n).map_err(core)?;
+            Ok(ok())
+        }
+        "remove_task" => {
+            let id = need_i64(&req, "id")?;
+            let del = req.get("delete_file").and_then(|v| v.as_bool()).unwrap_or(false);
+            ctx.engine.remove(id, del).map_err(core)?;
+            Ok(ok())
+        }
+        "pause_all" => {
+            ctx.engine.pause_all().map_err(core)?;
+            Ok(ok())
+        }
+        "resume_all" => {
+            ctx.engine.resume_all().map_err(core)?;
+            Ok(ok())
+        }
+        "get_settings" => Ok(settings_json(ctx.engine.settings())),
+        "put_settings" => {
+            let mut body = req.clone();
+            if let Some(obj) = body.as_object_mut() {
+                obj.remove("op");
+                if let Some(inner) = obj.remove("settings") {
+                    body = inner;
+                }
+            }
+            let body: EngineSettings = serde_json::from_value(body).map_err(err)?;
+            put_settings(ctx, body).await
+        }
+        "test_proxy" => {
+            let mut body: ProxyTestReq = serde_json::from_value(req).map_err(err)?;
+            if body.proxy.pass.is_empty() {
+                body.proxy.pass = ctx.engine.settings().proxy.pass;
+            }
+            let r = ctx.engine.probe_url(&body.proxy, &body.url).await.map_err(core)?;
+            serde_json::to_value(r).map_err(err)
+        }
+        "list_torrents" => {
+            serde_json::to_value(ctx.engine.list_torrents().map_err(core)?).map_err(err)
+        }
+        "add_torrent" => {
+            let body: AddTorrentReq = serde_json::from_value(req).map_err(err)?;
+            add_torrent(ctx, body).await
+        }
+        "pause_torrent" => {
+            ctx.engine
+                .pause_torrent(need_i64(&req, "id")?)
+                .map_err(core)?;
+            Ok(ok())
+        }
+        "resume_torrent" => {
+            ctx.engine
+                .resume_torrent(need_i64(&req, "id")?)
+                .map_err(core)?;
+            Ok(ok())
+        }
+        "select_files" => {
+            let id = need_i64(&req, "id")?;
+            let selected: Vec<u32> = serde_json::from_value(
+                req.get("selected").cloned().unwrap_or(json!([])),
+            )
+            .map_err(err)?;
+            serde_json::to_value(
+                ctx.engine.select_torrent_files(id, selected).map_err(core)?,
+            )
+            .map_err(err)
+        }
+        "remove_torrent" => {
+            let id = need_i64(&req, "id")?;
+            let del = req.get("delete_file").and_then(|v| v.as_bool()).unwrap_or(false);
+            ctx.engine.remove_torrent(id, del).await.map_err(core)?;
+            Ok(ok())
+        }
+        "remember_origin" => {
+            let origin = req
+                .get("origin")
+                .and_then(|v| v.as_str())
+                .ok_or("缺少 origin")?;
+            launch::remember_origin(&ctx.cfg_dir, origin)?;
+            Ok(ok())
+        }
+        _ => Err(format!("未知 op: {op}")),
+    }
 }

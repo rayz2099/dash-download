@@ -1,15 +1,13 @@
-//! 开机自启 + Chrome Native Messaging 最小 host.
-//! ADR 0003 的数据面仍是 localhost API; native host 只负责在 app 没跑时被扩展拉起,
-//! 否则 Takeover 会先 abort 浏览器下载再失败.
+//! 开机自启 + Chrome Native Messaging host.
+//! 数据面: 扩展 stdio → 本进程 ipc.sock; 不再经 127.0.0.1 HTTP.
 
 use serde_json::{json, Value};
 use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-pub const HOST_NAME: &str = "dev.ray.dash_download";
-pub const API_PORT: u16 = 41320;
+pub const HOST_NAME: &str = "top.linran.dd";
+const LEGACY_HOST_NAME: &str = "dev.ray.dash_download";
 /// 扩展 manifest.key 算出的稳定 ID, 未连上 API 也能写进 native host 白名单.
 pub const EXT_ID: &str = "agdjpgikicokkkbdgmdmhdpbhljieech";
 pub const EXT_ORIGIN: &str = "chrome-extension://agdjpgikicokkkbdgmdmhdpbhljieech/";
@@ -35,9 +33,14 @@ pub fn remember_origin(cfg_dir: &Path, origin: &str) -> Result<(), String> {
     install_native_host(cfg_dir)
 }
 
+pub fn cfg_dir() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("dash-download")
+}
+
 pub fn api_up() -> bool {
-    let sock = std::net::SocketAddr::from(([127, 0, 0, 1], API_PORT));
-    TcpStream::connect_timeout(&sock, Duration::from_millis(200)).is_ok()
+    crate::ipc::up(&cfg_dir())
 }
 
 fn exe_path() -> Result<PathBuf, String> {
@@ -137,8 +140,11 @@ pub fn install_native_host(cfg_dir: &Path) -> Result<(), String> {
     let _ = std::fs::create_dir_all(cfg_dir);
     let spec = host_json(cfg_dir)?;
     let name = format!("{HOST_NAME}.json");
+    let legacy = format!("{LEGACY_HOST_NAME}.json");
     for dir in nm_dirs()? {
         let _ = std::fs::create_dir_all(&dir);
+        // Host ID 已迁移，主动清理旧入口，避免浏览器继续保留废弃通道。
+        let _ = std::fs::remove_file(dir.join(&legacy));
         let dest = dir.join(&name);
         std::fs::write(&dest, serde_json::to_vec_pretty(&spec).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
@@ -151,6 +157,10 @@ pub fn install_native_host(cfg_dir: &Path) -> Result<(), String> {
                 r"HKCU\Software\Microsoft\Edge\NativeMessagingHosts\",
                 r"HKCU\Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\",
             ] {
+                let old = format!("{key}{LEGACY_HOST_NAME}");
+                let _ = std::process::Command::new("reg")
+                    .args(["delete", &old, "/f"])
+                    .status();
                 let _ = std::process::Command::new("reg")
                     .args(["add", &format!("{key}{HOST_NAME}"), "/ve", "/d", &dest_s, "/f"])
                     .status();
@@ -212,7 +222,7 @@ fn nm_read() -> Result<Value, String> {
     let mut len_buf = [0u8; 4];
     stdin.read_exact(&mut len_buf).map_err(|e| e.to_string())?;
     let len = u32::from_le_bytes(len_buf) as usize;
-    if len == 0 || len > 1024 * 1024 {
+    if len == 0 || len > 64 * 1024 * 1024 {
         return Err("native message 长度非法".into());
     }
     let mut buf = vec![0u8; len];
@@ -231,14 +241,25 @@ fn nm_write(v: &Value) -> Result<(), String> {
     Ok(())
 }
 
-/// Chrome stdio host: 不写 stdout 日志. 已在跑则直接 ok, 否则拉起 GUI 并等到 API 端口起来.
+/// Chrome stdio host: 不写 stdout 日志. 读一条, 必要时拉 GUI, 经 ipc.sock 进引擎, 回一条.
 pub fn run_native_host() {
-    let _ = nm_read();
-    let reply = match wake() {
-        Ok(()) => json!({ "ok": true }),
+    let req = match nm_read() {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = nm_write(&json!({ "ok": false, "error": e }));
+            return;
+        }
+    };
+    let reply = match forward(req) {
+        Ok(v) => v,
         Err(e) => json!({ "ok": false, "error": e }),
     };
     let _ = nm_write(&reply);
+}
+
+fn forward(req: Value) -> Result<Value, String> {
+    wake()?;
+    crate::ipc::call(&cfg_dir(), &req)
 }
 
 fn wake() -> Result<(), String> {
@@ -253,5 +274,5 @@ fn wake() -> Result<(), String> {
         }
         std::thread::sleep(Duration::from_millis(200));
     }
-    Err("拉起后 API 未就绪".into())
+    Err("拉起后 IPC 未就绪".into())
 }

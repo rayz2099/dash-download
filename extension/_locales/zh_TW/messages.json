@@ -1,0 +1,27 @@
+{
+  "app_description": { "message": "接管瀏覽器下載、磁力連結和 .torrent 檔案" },
+  "checking": { "message": "檢測中…" },
+  "takeover": { "message": "接管瀏覽器下載" },
+  "takeover_hint": { "message": "啟用時申請網站存取權限" },
+  "min_size": { "message": "最小大小（MB）" },
+  "min_size_hint": { "message": "小於此值由 Chrome 下載；0 表示不限" },
+  "denylist": { "message": "網域封鎖清單" },
+  "denylist_hint": { "message": "每行一個 host，包含子網域" },
+  "footer": { "message": "應用程式無法使用時保留 Chrome 下載" },
+  "ping_failed": { "message": "連線失敗" },
+  "connected": {
+    "message": "已連線 v$VERSION$",
+    "placeholders": { "version": { "content": "$1" } }
+  },
+  "starting_app": { "message": "正在啟動應用程式…" },
+  "app_not_running": { "message": "應用程式未執行" },
+  "native_no_reply": { "message": "Native Host 無回應" },
+  "native_failed": { "message": "Native Host 呼叫失敗" },
+  "content_too_large": { "message": "匯入內容過大" },
+  "blob_unsupported": { "message": "不支援頁面 Blob 位址" },
+  "takeover_failed": { "message": "接管失敗" },
+  "context_download": { "message": "使用 Dash Download 下載" },
+  "site_access_required": { "message": "請先啟用接管並授予網站存取權限" },
+  "app_start_failed": { "message": "無法啟動 Dash Download" },
+  "send_failed": { "message": "傳送失敗" }
+}

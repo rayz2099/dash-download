@@ -1,6 +1,7 @@
 import { useEffect, useState } from "preact/hooks";
 import * as api from "./api";
 import { IcoFolder } from "./icons";
+import { t } from "./i18n";
 
 function clampInt(raw: string, min: number, max: number): number | null {
   const n = Number.parseInt(raw, 10);
@@ -87,7 +88,7 @@ export function DirPick(props: { value: string; onChange: (dir: string) => void 
           if (dir !== props.value) props.onChange(dir);
         });
       }}>
-        <IcoFolder size={15} /> 浏览
+        <IcoFolder size={15} /> {t("浏览", "Browse")}
       </button>
     </div>
   );

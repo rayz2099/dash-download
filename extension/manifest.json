@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Dash Download",
-  "version": "1.2.7",
+  "version": "1.2.8",
   "description": "__MSG_app_description__",
   "default_locale": "en",
   "permissions": [
@@ -12,7 +12,7 @@
     "notifications",
     "nativeMessaging"
   ],
-  "optional_host_permissions": [
+  "host_permissions": [
     "http://*/*",
     "https://*/*"
   ],

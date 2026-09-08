@@ -1050,7 +1050,7 @@ dependencies = [
 
 [[package]]
 name = "dd-app"
-version = "1.2.7"
+version = "1.2.8"
 dependencies = [
  "base64 0.22.1",
  "dd-core",
@@ -1072,7 +1072,7 @@ dependencies = [
 
 [[package]]
 name = "dd-core"
-version = "1.2.7"
+version = "1.2.8"
 dependencies = [
  "futures-util",
  "librqbit",

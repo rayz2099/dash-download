@@ -2,46 +2,20 @@
 importScripts("policy.js");
 
 const NATIVE = "top.linran.dd";
-const DEFAULTS = { enabled: true, minBytes: 1024 * 1024, denyHosts: [] };
+/// 只认总开关. 体积阈值和域名黑名单不再进产品面, 旧 storage 里的值忽略.
+const DEFAULTS = { enabled: true };
 const msg = (key) => chrome.i18n.getMessage(key);
-/// 全站 host 不进必选权限；仅在接管开启时申请，关闭后立即收回。
-const SITE_ORIGINS = ["http://*/*", "https://*/*"];
 
 let cached = { ...DEFAULTS };
 const inflight = new Set();
 const sent = new Set();
-let siteAccess = false;
-
-function refreshSiteAccess() {
-  return chrome.permissions.contains({ origins: SITE_ORIGINS }).then((ok) => {
-    siteAccess = ok;
-    return ok;
-  });
-}
 
 chrome.storage.local.get(DEFAULTS, (cfg) => {
   cached.enabled = cfg.enabled;
-  cached.minBytes = cfg.minBytes;
-  cached.denyHosts = cfg.denyHosts;
-  refreshSiteAccess();
 });
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;
   if (changes.enabled) cached.enabled = changes.enabled.newValue;
-  if (changes.minBytes) cached.minBytes = changes.minBytes.newValue;
-  if (changes.denyHosts) cached.denyHosts = changes.denyHosts.newValue;
-});
-
-chrome.permissions.onAdded.addListener(() => {
-  refreshSiteAccess();
-});
-chrome.permissions.onRemoved.addListener(() => {
-  refreshSiteAccess().then((ok) => {
-    if (!ok && cached.enabled) {
-      cached.enabled = false;
-      chrome.storage.local.set({ enabled: false });
-    }
-  });
 });
 
 function sleep(ms) {
@@ -162,8 +136,8 @@ async function captureUrl(url, extra) {
 function takeover(item) {
   const url = item.finalUrl || item.url;
   const key = itemKey(url);
-  if (!cached.enabled || !siteAccess) return;
-  if (!shouldTakeover(item, cached)) return;
+  if (!cached.enabled) return;
+  if (!shouldTakeover(item)) return;
   if (sent.has(key)) {
     abortChrome(item.id);
     return;
@@ -207,7 +181,6 @@ chrome.runtime.onInstalled.addListener(() => {
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (info.menuItemId !== "dd-download-link" || !info.linkUrl) return;
   try {
-    if (!siteAccess) throw new Error(msg("site_access_required"));
     if (!(await ensureApp())) throw new Error(msg("app_start_failed"));
     await captureUrl(info.linkUrl, { referrer: tab && tab.url });
   } catch (e) {

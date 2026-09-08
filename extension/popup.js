@@ -1,6 +1,5 @@
 const NATIVE = "top.linran.dd";
-const DEFAULTS = { enabled: true, minBytes: 1024 * 1024, denyHosts: [] };
-const SITE_ORIGINS = ["http://*/*", "https://*/*"];
+const DEFAULTS = { enabled: true };
 const $ = (id) => document.getElementById(id);
 const msg = (key, subs) => chrome.i18n.getMessage(key, subs);
 
@@ -13,15 +12,6 @@ const state = { ...DEFAULTS };
 
 function renderToggle() {
   $("toggle").classList.toggle("on", state.enabled);
-}
-
-function renderRules() {
-  $("minMb").value = String(state.minBytes / (1024 * 1024));
-  $("deny").value = (state.denyHosts || []).join("\n");
-}
-
-function parseDeny(text) {
-  return text.split("\n").map((s) => s.trim()).filter(Boolean);
 }
 
 async function ping() {
@@ -52,50 +42,15 @@ async function checkHealth() {
   $("status").textContent = msg("app_not_running");
 }
 
-chrome.storage.local.get(DEFAULTS, async (cfg) => {
+chrome.storage.local.get(DEFAULTS, (cfg) => {
   state.enabled = cfg.enabled;
-  state.minBytes = cfg.minBytes;
-  state.denyHosts = cfg.denyHosts;
-  if (state.enabled) {
-    const has = await chrome.permissions.contains({ origins: SITE_ORIGINS });
-    if (!has) {
-      const ok = await chrome.permissions.request({ origins: SITE_ORIGINS });
-      if (!ok) {
-        state.enabled = false;
-        chrome.storage.local.set({ enabled: false });
-      }
-    }
-  }
   renderToggle();
-  renderRules();
 });
 
-$("toggle").addEventListener("click", async () => {
-  if (!state.enabled) {
-    const ok = await chrome.permissions.request({ origins: SITE_ORIGINS });
-    if (!ok) return;
-    state.enabled = true;
-  } else {
-    state.enabled = false;
-    await chrome.permissions.remove({ origins: SITE_ORIGINS });
-  }
+$("toggle").addEventListener("click", () => {
+  state.enabled = !state.enabled;
   chrome.storage.local.set({ enabled: state.enabled });
   renderToggle();
-});
-
-$("minMb").addEventListener("change", () => {
-  const n = Number($("minMb").value);
-  if (!Number.isFinite(n) || n < 0) {
-    renderRules();
-    return;
-  }
-  state.minBytes = Math.round(n * 1024 * 1024);
-  chrome.storage.local.set({ minBytes: state.minBytes });
-});
-
-$("deny").addEventListener("change", () => {
-  state.denyHosts = parseDeny($("deny").value);
-  chrome.storage.local.set({ denyHosts: state.denyHosts });
 });
 
 checkHealth();

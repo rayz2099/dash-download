@@ -42,14 +42,6 @@ h1 { font-size: 14px; font-weight: 600; margin-bottom: 14px; display: flex; alig
 }
 .toggle.on::after { left: 17px; }
 .footer { margin-top: 4px; font-size: 12px; color: var(--text-2); line-height: 1.5; }
-.field { margin-top: 10px; }
-.field label { display: block; font-size: 13px; }
-.field input, .field textarea {
-  width: 100%; margin-top: 6px; padding: 6px 8px;
-  border: 1px solid var(--border); border-radius: 6px;
-  background: var(--panel); color: var(--text-1); font: inherit;
-}
-.field textarea { resize: vertical; min-height: 56px; }
 </style>
 </head>
 <body>
@@ -64,16 +56,6 @@ h1 { font-size: 14px; font-weight: 600; margin-bottom: 14px; display: flex; alig
       <div class="hint" data-i18n="takeover_hint"></div>
     </div>
     <button class="toggle" id="toggle"></button>
-  </div>
-  <div class="field">
-    <label data-i18n="min_size"></label>
-    <div class="hint" data-i18n="min_size_hint"></div>
-    <input id="minMb" type="number" min="0" step="1" />
-  </div>
-  <div class="field">
-    <label data-i18n="denylist"></label>
-    <div class="hint" data-i18n="denylist_hint"></div>
-    <textarea id="deny" placeholder="example.com"></textarea>
   </div>
   <div class="footer" data-i18n="footer"></div>
   <script src="popup.js"></script>

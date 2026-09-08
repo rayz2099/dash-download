@@ -1,6 +1,5 @@
 // 纯策略, 给 SW importScripts 与 node:test 共用.
 (function (g) {
-  const MIN_BYTES = 1024 * 1024;
   /// 与引擎 MAX_IMPORT_BYTES 对齐. JSON base64 约 4/3, app body 上限 32MB.
   const MAX_INLINE_BYTES = 24 * 1024 * 1024;
 
@@ -58,8 +57,8 @@
     return 0;
   }
 
-  /// 只接管值得交给引擎的文件: 内部协议 / HTML / 低于体积阈值 / 黑名单域名留给浏览器.
-  function shouldTakeover(item, rules) {
+  /// 开关打开就接管所有下载. 内部协议 / HTML 导航 / 页面 blob 仍留给浏览器.
+  function shouldTakeover(item) {
     const url = (item && (item.finalUrl || item.url)) || "";
     if (!url) return false;
     if (/^(chrome|chrome-extension|about|edge|devtools|javascript|mailto):/i.test(url)) {
@@ -70,12 +69,6 @@
     const mime = ((item && item.mime) || "").split(";")[0].trim().toLowerCase();
     if (mime === "application/x-bittorrent" || /\.torrent(\?|#|$)/i.test(url)) return true;
     if (mime === "text/html") return false;
-    const minBytes = rules && Number.isFinite(Number(rules.minBytes))
-      ? Number(rules.minBytes)
-      : MIN_BYTES;
-    const size = itemBytes(item);
-    if (minBytes > 0 && size > 0 && size < minBytes) return false;
-    if (hostDenied(hostOf(url), rules && rules.denyHosts)) return false;
     return true;
   }
 
@@ -104,7 +97,7 @@
 
   const api = {
     isBlobLike, blobId, itemKey, shouldTakeover, decodeDataUrl, hostOf, hostDenied, itemBytes,
-    inlineTooLarge, MIN_BYTES, MAX_INLINE_BYTES,
+    inlineTooLarge, MAX_INLINE_BYTES,
   };
   g.ddPolicy = api;
   g.isBlobLike = isBlobLike;
@@ -115,6 +108,5 @@
   g.hostOf = hostOf;
   g.hostDenied = hostDenied;
   g.itemBytes = itemBytes;
-  g.MIN_BYTES = MIN_BYTES;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(typeof self !== "undefined" ? self : globalThis);

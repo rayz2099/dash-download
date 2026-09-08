@@ -1,3 +1,10 @@
+## 1.2.8 - 2026-09-08
+
+### Changes
+- Chrome extension popup keeps a single takeover toggle, on by default
+- Takeover covers all site downloads; the 1MB threshold and domain denylist are gone
+- Site access is a required host permission, so takeover no longer waits on an extra grant
+
 ## 1.2.6 - 2026-09-08
 
 ### Fixes

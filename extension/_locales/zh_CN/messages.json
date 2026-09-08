@@ -2,11 +2,7 @@
   "app_description": { "message": "接管浏览器下载、磁力链接和 .torrent 文件" },
   "checking": { "message": "检测中…" },
   "takeover": { "message": "接管浏览器下载" },
-  "takeover_hint": { "message": "启用时申请网站访问权限" },
-  "min_size": { "message": "最小体积（MB）" },
-  "min_size_hint": { "message": "小于此值由 Chrome 下载；0 表示不限" },
-  "denylist": { "message": "域名黑名单" },
-  "denylist_hint": { "message": "一行一个 host，包含子域名" },
+  "takeover_hint": { "message": "关闭后由 Chrome 自行下载" },
   "footer": { "message": "应用不可用时保留 Chrome 下载" },
   "ping_failed": { "message": "连接失败" },
   "connected": {
@@ -21,7 +17,6 @@
   "blob_unsupported": { "message": "不支持页面 Blob 地址" },
   "takeover_failed": { "message": "接管失败" },
   "context_download": { "message": "使用 Dash Download 下载" },
-  "site_access_required": { "message": "请先启用接管并授予网站访问权限" },
   "app_start_failed": { "message": "无法启动 Dash Download" },
   "send_failed": { "message": "发送失败" }
 }

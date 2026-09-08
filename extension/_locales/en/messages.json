@@ -2,11 +2,7 @@
   "app_description": { "message": "Send browser downloads, magnet links, and .torrent files to Dash Download" },
   "checking": { "message": "Checking…" },
   "takeover": { "message": "Take over browser downloads" },
-  "takeover_hint": { "message": "Requests site access while enabled" },
-  "min_size": { "message": "Minimum size (MB)" },
-  "min_size_hint": { "message": "Smaller files stay in Chrome; 0 disables the limit" },
-  "denylist": { "message": "Domain denylist" },
-  "denylist_hint": { "message": "One host per line; includes subdomains" },
+  "takeover_hint": { "message": "When off, Chrome handles downloads itself" },
   "footer": { "message": "Chrome keeps the download if the app is unavailable" },
   "ping_failed": { "message": "Connection failed" },
   "connected": {
@@ -21,7 +17,6 @@
   "blob_unsupported": { "message": "Page blob URLs are not supported" },
   "takeover_failed": { "message": "Takeover failed" },
   "context_download": { "message": "Download with Dash Download" },
-  "site_access_required": { "message": "Enable takeover and grant site access first" },
   "app_start_failed": { "message": "Could not start Dash Download" },
   "send_failed": { "message": "Send failed" }
 }

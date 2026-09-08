@@ -333,17 +333,19 @@ export function App() {
     op.catch(console.error);
   };
 
+  /// 先关确认框，避免批量删除等待/部分失败时弹窗卡住。
   const removeMany = (keys: string[], delFile: boolean) => {
     if (!keys.length) return;
-    Promise.all(keys.map((k) => {
+    setDelAsk(null);
+    setPicked(new Set());
+    setMenu(null);
+    Promise.allSettled(keys.map((k) => {
       const id = Number(k.slice(2));
       return k.startsWith("b-") ? api.removeTorrent(id, delFile) : api.removeTask(id, delFile);
-    }))
-      .then(() => {
-        setPicked(new Set());
-        setDelAsk(null);
-      })
-      .catch(console.error);
+    })).then((rs) => {
+      const fail = rs.find((r) => r.status === "rejected");
+      if (fail && fail.status === "rejected") console.error(fail.reason);
+    });
   };
 
   const onRowClick = (t: Row, e: MouseEvent) => {

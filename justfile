@@ -16,6 +16,10 @@ no_updater := '{"bundle":{"createUpdaterArtifacts":false}}'
 default:
     @just --list
 
+# 交叉编译会留下 debug/三端 target, 本机可轻松到数十 GB
+clean:
+    cargo clean
+
 # 安装 pnpm 依赖并补齐 rustup 交叉编译 target
 setup:
     pnpm install

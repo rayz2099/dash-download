@@ -9,7 +9,7 @@ use crate::types::{
     AddTaskOptions, EngineEvent, RequestContext, SegmentInfo, TaskInfo, TaskProgress, TaskState,
 };
 use crate::writer::TaskFile;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -83,6 +83,7 @@ fn build_client(ua: &str, proxy: &ProxyCfg) -> Result<reqwest::Client> {
 /// 运行中任务的内存句柄: 段进度用原子量共享给采样器, 避免任何进度锁
 struct Running {
     cancel: watch::Sender<bool>,
+    finished: watch::Receiver<bool>,
     /// 区分 pause (保留断点, 状态回 Paused) 与 cancel/remove (直接退出)
     pause_intent: Arc<AtomicBool>,
     /// (idx, 已下载字节) 与 segments 顺序一致
@@ -96,6 +97,7 @@ pub(crate) struct Inner {
     pub(crate) store: Mutex<Store>,
     running: Mutex<HashMap<i64, Running>>,
     speeds: Mutex<HashMap<i64, u64>>,
+    stopping: Mutex<HashSet<i64>>,
     events: broadcast::Sender<EngineEvent>,
     pub(crate) torrent_ev: broadcast::Sender<TorrentEvent>,
     /// Session 后台起来, 避免 UPnP/DHT 挡住窗口
@@ -123,6 +125,7 @@ impl Engine {
     pub async fn new(cfg: EngineConfig) -> Result<Engine> {
         let store = Store::open(&cfg.db_path)?;
         store.recover_interrupted()?;
+        migrate_partial_paths(&store)?;
         let live = cfg.settings.clone();
         live.validate()?;
         let client = build_client(&cfg.user_agent, &live.proxy)?;
@@ -135,6 +138,7 @@ impl Engine {
             store: Mutex::new(store),
             running: Mutex::new(HashMap::new()),
             speeds: Mutex::new(HashMap::new()),
+            stopping: Mutex::new(HashSet::new()),
             events,
             torrent_ev,
             bt: Mutex::new(None),
@@ -276,7 +280,7 @@ impl Engine {
         }
         let live = self.inner.live.lock().unwrap().clone();
         let dir = opts.dir.clone().unwrap_or_else(|| live.default_dir.clone());
-        let name = opts.name.clone().unwrap_or_default();
+        let name = opts.name.as_deref().map(sanitize).unwrap_or_default();
         let max_segments = opts.segments.unwrap_or(live.max_segments).clamp(1, MAX_CONN);
         let id = self.inner.store.lock().unwrap().insert_task(
             url,
@@ -337,12 +341,14 @@ impl Engine {
         let dir = live.default_dir.clone();
         std::fs::create_dir_all(&dir)?;
         let name = import_name(name, mime.as_deref());
-        let dest = unique_path(Path::new(&dir), &name);
+        let mut partial = tempfile::Builder::new().prefix("import-").suffix(".ddown").tempfile_in(&dir)?;
+        std::io::Write::write_all(&mut partial, bytes)?;
+        partial.as_file().sync_all()?;
+        let dest = publish_file(partial.path(), Path::new(&dir), &name)?;
         let final_name = dest
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or(name);
-        std::fs::write(&dest, bytes)?;
         let size = bytes.len() as u64;
         let id = {
             let mut store = self.inner.store.lock().unwrap();
@@ -388,14 +394,19 @@ impl Engine {
     /// 恢复暂停/失败/取消的任务: 回到队列由调度器按并发额度拉起.
     /// Canceled 与 Paused 一样保留 .ddown, 取消不是删任务.
     pub fn resume(&self, id: i64) -> Result<()> {
-        let info = self.inner.task_info(id)?;
-        if !matches!(
-            info.state,
-            TaskState::Paused | TaskState::Failed | TaskState::Canceled
-        ) {
-            return Ok(());
+        {
+            let running = self.inner.running.lock().unwrap();
+            if running.contains_key(&id) || self.inner.stopping.lock().unwrap().contains(&id) {
+                return Err(CoreError::Other("任务正在停止，请稍后恢复".into()));
+            }
+            let store = self.inner.store.lock().unwrap();
+            let info = store.get_task(id)?.ok_or(CoreError::NotFound(id))?;
+            if !matches!(info.state, TaskState::Paused | TaskState::Failed | TaskState::Canceled) {
+                return Ok(());
+            }
+            store.set_state(id, TaskState::Queued, "")?;
         }
-        self.inner.set_state_emit(id, TaskState::Queued, "")?;
+        self.inner.emit(EngineEvent::TaskUpdated { task: self.task(id)? });
         self.inner.clone().schedule();
         Ok(())
     }
@@ -420,7 +431,7 @@ impl Engine {
     pub fn resume_all(&self) -> Result<()> {
         for t in self.list()? {
             if matches!(t.state, TaskState::Paused | TaskState::Failed) {
-                self.inner.set_state_emit(t.id, TaskState::Queued, "")?;
+                let _ = self.resume(t.id);
             }
         }
         if self.inner.live.lock().unwrap().p2p {
@@ -516,29 +527,42 @@ impl Engine {
         self.inner.clone().schedule();
     }
 
-    /// 用原链接重新下载 (NDM 的 Redownload): 清进度重新排队.
-    /// 注意: 运行中的管理协程收到 cancel 后可能补写一次过期 checkpoint,
-    /// 只影响短暂的显示值, 下次采样即被覆盖, 不做加锁串行化
-    pub fn redownload(&self, id: i64) -> Result<()> {
-        let media = self.inner.store.lock().unwrap().load_media(id)?.is_some();
-        if media && self.inner.running.lock().unwrap().contains_key(&id) {
-            return Err(CoreError::Other("请先暂停视频任务，停止后再重新下载".into()));
-        }
-        if media {
-            let info = self.inner.task_info(id)?;
-            let _ = std::fs::remove_dir_all(Path::new(&info.dir).join(format!(".dd-media-{id}")));
-        }
-        {
-            let mut running = self.inner.running.lock().unwrap();
-            if let Some(r) = running.remove(&id) {
+    /// Wait for the worker (and its subprocesses) before touching its files.
+    async fn stop_for_mutation(&self, id: i64) -> Result<StopGuard> {
+        let (guard, finished) = {
+            let running = self.inner.running.lock().unwrap();
+            let mut stopping = self.inner.stopping.lock().unwrap();
+            if stopping.contains(&id) {
+                return Err(CoreError::Other("任务正在停止，请稍后重试".into()));
+            }
+            let store = self.inner.store.lock().unwrap();
+            let info = store.get_task(id)?.ok_or(CoreError::NotFound(id))?;
+            // Prevent a queued task from starting while this operation yields.
+            if info.state == TaskState::Queued { store.set_state(id, TaskState::Canceled, "")?; }
+            stopping.insert(id);
+            let finished = running.get(&id).map(|r| {
                 r.pause_intent.store(false, Ordering::Relaxed);
-                let _ = r.cancel.send_replace(true);
+                r.cancel.send_replace(true);
+                r.finished.clone()
+            });
+            (StopGuard { inner: self.inner.clone(), id }, finished)
+        };
+        if let Some(mut finished) = finished {
+            while !*finished.borrow() {
+                if finished.changed().await.is_err() { break; }
             }
         }
+        Ok(guard)
+    }
+
+    /// Redownload owns fresh partial data; the previous completed file is preserved.
+    pub async fn redownload(&self, id: i64) -> Result<()> {
+        let guard = self.stop_for_mutation(id).await?;
         let info = self.inner.task_info(id)?;
-        let _ = std::fs::remove_file(info.part_path());
+        remove_partial(&info.part_path())?;
         self.inner.store.lock().unwrap().reset_task(id)?;
         self.inner.set_state_emit(id, TaskState::Queued, "")?;
+        drop(guard);
         self.inner.clone().schedule();
         Ok(())
     }
@@ -569,26 +593,21 @@ impl Engine {
     }
 
     /// 删除任务. delete_file 控制是否清磁盘 (含 .ddown 与成品); 不勾选则只从表移除.
-    pub fn remove(&self, id: i64, delete_file: bool) -> Result<()> {
+    pub async fn remove(&self, id: i64, delete_file: bool) -> Result<()> {
+        let _guard = self.stop_for_mutation(id).await?;
         let info = self.inner.task_info(id)?;
-        {
-            let mut running = self.inner.running.lock().unwrap();
-            if let Some(r) = running.remove(&id) {
-                r.pause_intent.store(false, Ordering::Relaxed);
-                let _ = r.cancel.send_replace(true);
-            }
+        if delete_file {
+            remove_partial(&info.part_path())?;
+            // An unfinished task does not own an existing final file with this name.
+            if info.state == TaskState::Completed { remove_partial(&info.final_path())?; }
         }
         self.inner.store.lock().unwrap().delete_task(id)?;
-        if delete_file {
-            let _ = std::fs::remove_file(info.part_path());
-            let _ = std::fs::remove_file(info.final_path());
-            let _ = std::fs::remove_dir_all(Path::new(&info.dir).join(format!(".dd-media-{id}")));
-        }
         self.inner.speeds.lock().unwrap().remove(&id);
         self.inner.emit(EngineEvent::TaskRemoved { id });
         self.inner.clone().schedule();
         Ok(())
     }
+
 }
 
 impl Inner {
@@ -641,12 +660,18 @@ impl Inner {
                 if running.len() >= max { return; }
                 let store = self.store.lock().unwrap();
                 let next = match store.next_queued() { Ok(Some(id)) => id, _ => return };
+                if self.stopping.lock().unwrap().contains(&next) { return; }
                 let (cancel, _) = watch::channel(false);
-                running.insert(next, Running { cancel, pause_intent: Arc::new(AtomicBool::new(false)), segs: Vec::new() });
+                let (finished_tx, finished) = watch::channel(false);
+                running.insert(next, Running { cancel, finished, pause_intent: Arc::new(AtomicBool::new(false)), segs: Vec::new() });
                 let _ = store.set_state(next, TaskState::Probing, "");
-                next
+                (next, finished_tx)
             };
-            tokio::spawn(self.clone().run_task(next));
+            let inner = self.clone();
+            tokio::spawn(async move {
+                inner.run_task(next.0).await;
+                next.1.send_replace(true);
+            });
         }
     }
 
@@ -678,25 +703,25 @@ impl Inner {
 
     async fn drive_media(self: Arc<Self>, info: TaskInfo, ctx: RequestContext, options: crate::media::MediaOptions) -> Result<()> {
         let id = info.id;
-        let done = Arc::new(AtomicU64::new(0));
+        let done = Arc::new(AtomicU64::new(if info.part_path().exists() { info.done } else { 0 }));
         let (rx, pause) = {
             let mut running = self.running.lock().unwrap();
             let Some(r) = running.get_mut(&id) else { return Ok(()); };
             r.segs = vec![(0, done.clone())];
             (r.cancel.subscribe(), r.pause_intent.clone())
         };
-        let work = Path::new(&info.dir).join(format!(".dd-media-{id}"));
+        let work = info.part_path();
         self.set_state_emit(id, TaskState::Active, "")?;
         let proxy = self.live.lock().unwrap().proxy.clone();
         let result = crate::media::download(&info.url, &ctx, &options, &proxy, &work, done.clone(), rx).await?;
+        self.store.lock().unwrap().checkpoint(id, done.load(Ordering::Relaxed), &[])?;
         let ours = self.running.lock().unwrap().get(&id).is_some_and(|r| Arc::ptr_eq(&r.pause_intent, &pause));
         if !ours { return Ok(()); }
         if let Some(path) = result {
             let output_name = format!("{}.{}", info.name.trim_end_matches(".mkv").trim_end_matches(".mp4"), options.container.extension());
-            let final_path = unique_path(Path::new(&info.dir), &output_name);
+            let final_path = publish_file(&path, Path::new(&info.dir), &output_name)?;
             let name = final_path.file_name().unwrap().to_string_lossy().into_owned();
-            let size = std::fs::metadata(&path)?.len();
-            std::fs::rename(path, final_path)?;
+            let size = std::fs::metadata(&final_path)?.len();
             let _ = std::fs::remove_dir_all(&work);
             {
                 let mut store = self.store.lock().unwrap();
@@ -711,7 +736,7 @@ impl Inner {
     }
 
     async fn drive_task(self: Arc<Self>, id: i64) -> Result<()> {
-        let (info, ctx) = {
+        let (mut info, ctx) = {
             let store = self.store.lock().unwrap();
             let info = store.get_task(id)?.ok_or(CoreError::NotFound(id))?;
             let ctx = store.load_ctx(id)?;
@@ -721,10 +746,29 @@ impl Inner {
         let media = self.store.lock().unwrap().load_media(id)?;
         if let Some(media) = media { return self.drive_media(info, ctx, media).await; }
 
+        // An externally deleted partial cannot be resumed using old byte offsets.
+        if !info.part_path().exists() && !info.segments.is_empty() {
+            let store = self.store.lock().unwrap();
+            store.reset_task(id)?;
+            info = store.get_task(id)?.ok_or(CoreError::NotFound(id))?;
+        }
+
         // 首跑探测; 续传 (已有分段) 跳过, 复用上次的 final_url 与分段布局
         let info = if info.segments.is_empty() {
             let http = self.client.lock().unwrap().clone();
-            let p = probe(&http, &info.url, &ctx).await?;
+            let (mut cancel, pause) = {
+                let running = self.running.lock().unwrap();
+                let Some(r) = running.get(&id) else { return Ok(()); };
+                (r.cancel.subscribe(), r.pause_intent.clone())
+            };
+            let p = tokio::select! {
+                biased;
+                _ = async { if !*cancel.borrow() { let _ = cancel.changed().await; } } => {
+                    self.set_state_emit(id, if pause.load(Ordering::Relaxed) { TaskState::Paused } else { TaskState::Canceled }, "")?;
+                    return Ok(());
+                }
+                result = probe(&http, &info.url, &ctx) => result?,
+            };
             let name = if info.name.is_empty() { p.filename.clone() } else { info.name.clone() };
             let segs = match (p.size, p.resumable) {
                 (Some(size), true) if size > 0 => {
@@ -787,7 +831,19 @@ impl Inner {
 
         let mut canceled = false;
         let mut first_err: Option<CoreError> = None;
-        while let Some(res) = set.join_next().await {
+        let mut file_check = tokio::time::interval(Duration::from_millis(200));
+        loop {
+            let res = tokio::select! {
+                biased;
+                _ = file_check.tick(), if first_err.is_none() => {
+                    if !info.part_path().exists() {
+                        first_err = Some(CoreError::Other("下载中的临时文件已被外部删除，下载已停止；恢复将重新下载".into()));
+                        if let Some(r) = self.running.lock().unwrap().get(&id) { r.cancel.send_replace(true); }
+                    }
+                    continue;
+                }
+                result = set.join_next() => match result { Some(result) => result, None => break },
+            };
             match res {
                 Ok(Ok(SegOutcome::Canceled)) => canceled = true,
                 Ok(Ok(SegOutcome::Complete)) => {}
@@ -818,7 +874,7 @@ impl Inner {
         if let Some(e) = first_err {
             return Err(e);
         }
-        if canceled {
+        if canceled || *cancel_rx.borrow() {
             let ours = {
                 let running = self.running.lock().unwrap();
                 running
@@ -847,12 +903,12 @@ impl Inner {
             }
         }
         file.sync()?;
-        let final_path = unique_path(Path::new(&info.dir), &info.name);
+        drop(file);
+        let final_path = publish_file(&info.part_path(), Path::new(&info.dir), &info.name)?;
         let final_name = final_path
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| info.name.clone());
-        std::fs::rename(info.part_path(), &final_path)?;
         {
             let store = self.store.lock().unwrap();
             if final_name != info.name {
@@ -957,23 +1013,65 @@ fn mime_ext(mime: &str) -> &'static str {
     }
 }
 
-/// 目标文件已存在时追加 " (n)" 序号, 不覆盖用户既有文件
-fn unique_path(dir: &Path, name: &str) -> PathBuf {
-    let candidate = dir.join(name);
-    if !candidate.exists() {
-        return candidate;
+// Upgrade old resumable data without ever assigning a shared partial to two tasks.
+fn migrate_partial_paths(store: &Store) -> Result<()> {
+    let tasks = store.list_tasks()?;
+    for task in &tasks {
+        if task.state == TaskState::Completed || task.part_path().exists() { continue; }
+        let media = store.load_media(task.id)?.is_some();
+        let old = Path::new(&task.dir).join(if media {
+            format!(".dd-media-{}", task.id)
+        } else { format!("{}.ddown", task.name) });
+        if !old.exists() { continue; }
+        if !media && tasks.iter().filter(|other| other.state != TaskState::Completed && other.dir == task.dir && other.name == task.name).count() != 1 {
+            store.set_state(task.id, TaskState::Failed, "旧临时文件被多个同名任务共用，请重新下载；旧文件已保留")?;
+            continue;
+        }
+        if let Err(e) = std::fs::rename(&old, task.part_path()) {
+            store.set_state(task.id, TaskState::Failed, &format!("迁移下载临时文件失败: {e}"))?;
+        }
     }
+    Ok(())
+}
+
+struct StopGuard {
+    inner: Arc<Inner>,
+    id: i64,
+}
+impl Drop for StopGuard {
+    fn drop(&mut self) { self.inner.stopping.lock().unwrap().remove(&self.id); }
+}
+
+fn remove_partial(path: &Path) -> Result<()> {
+    let result = if path.is_dir() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) };
+    match result {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Atomic no-replace publication: an existence check followed by rename can clobber
+/// a file created by another task (or application) between those two operations.
+fn publish_file(source: &Path, dir: &Path, name: &str) -> Result<PathBuf> {
     let (stem, ext) = match name.rfind('.') {
         Some(i) if i > 0 => (&name[..i], &name[i..]),
         _ => (name, ""),
     };
-    for n in 1..1000 {
-        let p = dir.join(format!("{stem} ({n}){ext}"));
-        if !p.exists() {
-            return p;
+    let mut temp = tempfile::TempPath::try_from_path(source)?;
+    // Failed publication must retain the completed partial for retry.
+    temp.disable_cleanup(true);
+    for n in 0u64.. {
+        let dest = dir.join(if n == 0 { name.to_owned() } else { format!("{stem} ({n}){ext}") });
+        match temp.persist_noclobber(&dest) {
+            Ok(()) => return Ok(dest),
+            Err(e) => {
+                temp = e.path;
+                if e.error.kind() != std::io::ErrorKind::AlreadyExists { return Err(e.error.into()); }
+            }
         }
     }
-    dir.join(format!("{stem} ({}){ext}", std::process::id()))
+    unreachable!()
 }
 
 #[cfg(test)]
@@ -998,6 +1096,61 @@ mod tests {
         Engine::new(EngineConfig::new(dir.join("t.db"), dir.join("dl")))
             .await
             .unwrap()
+    }
+
+    #[test]
+    fn lifecycle_publication_is_atomic_for_concurrent_same_name_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("same.bin"), b"original").unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let threads: Vec<_> = (0..8).map(|n| {
+            let dir = dir.path().to_owned();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                let partial = dir.join(format!("{n}.ddown"));
+                std::fs::write(&partial, [n]).unwrap();
+                barrier.wait();
+                let final_path = publish_file(&partial, &dir, "same.bin").unwrap();
+                assert_eq!(std::fs::read(final_path).unwrap(), [n]);
+            })
+        }).collect();
+        for thread in threads { thread.join().unwrap(); }
+        assert_eq!(std::fs::read(dir.path().join("same.bin")).unwrap(), b"original");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 9);
+    }
+
+    #[tokio::test]
+    async fn lifecycle_migrates_legacy_media_resume_directory() {
+        let eng = tmp_engine().await;
+        let task = eng.add_media("https://example.test/video.m3u8", AddTaskOptions {
+            name: Some("old.mp4".into()), queue_only: true, ..Default::default()
+        }, serde_json::from_str("{}").unwrap()).unwrap();
+        let old = Path::new(&task.dir).join(format!(".dd-media-{}", task.id));
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("video.mp4.part"), b"checkpoint").unwrap();
+        migrate_partial_paths(&eng.inner.store.lock().unwrap()).unwrap();
+        assert!(!old.exists());
+        assert_eq!(std::fs::read(task.part_path().join("video.mp4.part")).unwrap(), b"checkpoint");
+    }
+
+    #[tokio::test]
+    async fn lifecycle_same_name_tasks_have_distinct_partial_files() {
+        let eng = tmp_engine().await;
+        let opts = AddTaskOptions { name: Some("same.mp4".into()), queue_only: true, ..Default::default() };
+        let a = eng.add("https://example.test/a", opts.clone()).unwrap();
+        let b = eng.add("https://example.test/b", opts).unwrap();
+        assert_ne!(a.part_path(), b.part_path(), "resume must never reuse another task's partial file");
+    }
+
+    #[tokio::test]
+    async fn lifecycle_removing_unfinished_task_preserves_existing_same_name_file() {
+        let eng = tmp_engine().await;
+        let original = eng.import_bytes("https://example.test/original", Some("same.mp4".into()), None, b"original").unwrap();
+        let task = eng.add_media("https://example.test/video.m3u8", AddTaskOptions {
+            name: Some("same.mp4".into()), queue_only: true, ..Default::default()
+        }, serde_json::from_str("{}").unwrap()).unwrap();
+        eng.remove(task.id, true).await.unwrap();
+        assert_eq!(std::fs::read(original.final_path()).unwrap(), b"original");
     }
 
     #[tokio::test]

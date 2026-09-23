@@ -93,6 +93,7 @@ export interface TaskInfo {
   max_segments: number;
   created_at: number;
   completed_at: number | null;
+  temporary_path?: string;
 }
 
 export interface TaskProgress {

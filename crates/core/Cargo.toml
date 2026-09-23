@@ -15,6 +15,7 @@ tracing.workspace = true
 url.workspace = true
 futures-util.workspace = true
 rand.workspace = true
+tempfile = "3.27"
 librqbit = { version = "9.0.1", default-features = false, features = ["default-tls"] }
 
 [target.'cfg(unix)'.dependencies]

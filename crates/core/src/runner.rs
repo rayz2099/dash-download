@@ -146,7 +146,11 @@ async fn stream_range(
     let offset = seg.start + done.load(Ordering::Relaxed);
     let range = format!("bytes={}-{}", offset, seg.end - 1);
     let req = apply_ctx(client.get(url).header(header::RANGE, range), ctx);
-    let resp = req.send().await?.error_for_status()?;
+    let resp = tokio::select! {
+        biased;
+        _ = async { if !*cancel.borrow() { let _ = cancel.changed().await; } } => return Ok(SegOutcome::Canceled),
+        result = req.send() => result?.error_for_status()?,
+    };
     // 多段模式必须拿到 206: 返回 200 意味着服务器忽略了 Range,
     // 若照单全收会把整个文件写进本段区间, 直接判错重试
     if resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
@@ -199,7 +203,11 @@ pub(crate) async fn run_stream(
 ) -> Result<SegOutcome> {
     done.store(0, Ordering::Relaxed);
     let req = apply_ctx(client.get(&url), &ctx);
-    let resp = req.send().await?.error_for_status()?;
+    let resp = tokio::select! {
+        biased;
+        _ = async { if !*cancel.borrow() { let _ = cancel.changed().await; } } => return Ok(SegOutcome::Canceled),
+        result = req.send() => result?.error_for_status()?,
+    };
     let mut stream = resp.bytes_stream();
     let mut pos: u64 = 0;
     loop {

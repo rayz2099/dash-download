@@ -810,6 +810,8 @@ function DetailPane(props: { t: TaskInfo; collapsed: boolean; onToggle: () => vo
           {tab === "download" && (
             <>
               {line("URL", t.url)}
+              {line(tx("保存目录", "Save folder"), t.dir)}
+              {t.state !== "completed" && t.temporary_path && line(tx("下载临时路径", "Temporary path"), t.temporary_path)}
               {line(tx("状态", "Status"), STATE_META[t.state].label + (t.error ? ` — ${t.error}` : ""))}
               {line(tx("文件大小", "File size"), t.size ? fmtBytes(t.size) : tx("未知", "Unknown"))}
               {line(tx("已下载", "Downloaded"), `${fmtBytes(t.done)} ( ${pctLabel} )`)}

@@ -364,6 +364,44 @@ pub async fn download(
     done: Arc<AtomicU64>,
     mut cancel: watch::Receiver<bool>,
 ) -> Result<Option<PathBuf>> {
+    if *cancel.borrow() { return Ok(None); }
+    std::fs::create_dir_all(work)?;
+    // A marker detects removal even if yt-dlp recreates the directory before the next tick.
+    let marker = tempfile::Builder::new().prefix(".dd-active-").tempfile_in(work)?;
+    let (stop, rx) = watch::channel(false);
+    let download = download_inner(url, ctx, options, proxy, work, done, rx);
+    tokio::pin!(download);
+    let mut tick = tokio::time::interval(Duration::from_millis(200));
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancel.changed() => {
+                stop.send_replace(true);
+                return download.await;
+            }
+            _ = tick.tick() => {
+                if !marker.path().exists() {
+                    stop.send_replace(true);
+                    // Join the subprocess cleanup before reporting that the task stopped.
+                    let _ = download.await;
+                    let _ = std::fs::remove_dir_all(work);
+                    return Err(CoreError::Other("下载中的临时文件已被外部删除，下载已停止；恢复将重新下载".into()));
+                }
+            }
+            result = &mut download => return result,
+        }
+    }
+}
+
+async fn download_inner(
+    url: &str,
+    ctx: &RequestContext,
+    options: &MediaOptions,
+    proxy: &ProxyCfg,
+    work: &Path,
+    done: Arc<AtomicU64>,
+    mut cancel: watch::Receiver<bool>,
+) -> Result<Option<PathBuf>> {
     if *cancel.borrow() {
         return Ok(None);
     }

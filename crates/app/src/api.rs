@@ -201,7 +201,7 @@ pub async fn dispatch(ctx: &ApiCtx, req: Value) -> Result<Value, String> {
             Ok(ok())
         }
         "redownload_task" => {
-            ctx.engine.redownload(need_i64(&req, "id")?).map_err(core)?;
+            ctx.engine.redownload(need_i64(&req, "id")?).await.map_err(core)?;
             Ok(ok())
         }
         "set_connections" => {
@@ -213,7 +213,7 @@ pub async fn dispatch(ctx: &ApiCtx, req: Value) -> Result<Value, String> {
         "remove_task" => {
             let id = need_i64(&req, "id")?;
             let del = req.get("delete_file").and_then(|v| v.as_bool()).unwrap_or(false);
-            ctx.engine.remove(id, del).map_err(core)?;
+            ctx.engine.remove(id, del).await.map_err(core)?;
             Ok(ok())
         }
         "pause_all" => {

@@ -107,6 +107,8 @@ async fn hls_and_dash_download_complete_audio_video() {
     listener.set_nonblocking(true).unwrap();
     let stop = Arc::new(AtomicBool::new(false));
     let stopped = stop.clone();
+    let slow = Arc::new(AtomicBool::new(false));
+    let slow_server = slow.clone();
     let root = dir.clone();
     let server = std::thread::spawn(move || {
         while !stopped.load(Ordering::Relaxed) {
@@ -129,6 +131,9 @@ async fn hls_and_dash_download_complete_audio_video() {
             let authorized = req.to_lowercase().contains("cookie: session=fixture");
             let data = std::fs::read(root.join(file)).ok();
             if let Some(data) = data.filter(|_| authorized) {
+                if slow_server.load(Ordering::Relaxed) && (file.ends_with(".ts") || file.ends_with(".m4s")) {
+                    std::thread::sleep(Duration::from_millis(350));
+                }
                 let mime = if file.ends_with("m3u8") {
                     "application/vnd.apple.mpegurl"
                 } else if file.ends_with("mpd") {
@@ -216,6 +221,51 @@ async fn hls_and_dash_download_complete_audio_video() {
         assert!(output.status.success());
         let log = String::from_utf8_lossy(&output.stderr);
         assert!(log.contains("Video:") && log.contains("Audio:"), "{log}");
+    }
+    // Exercise an actual yt-dlp process while it is writing fragments.
+    slow.store(true, Ordering::Relaxed);
+    for external_delete in [true, false] {
+        let task = eng.add_media(&format!("http://{address}/master.m3u8"), AddTaskOptions {
+            name: Some("Lifecycle video".into()), ctx: ctx.clone(), ..Default::default()
+        }, serde_json::from_str("{}").unwrap()).unwrap();
+        let work = task.part_path();
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let writing = std::fs::read_dir(&work).ok().into_iter().flatten().flatten()
+                    .any(|e| e.file_name().to_string_lossy().ends_with(".part"));
+                if writing { break; }
+                let state = eng.task(task.id).unwrap();
+                assert_ne!(state.state, TaskState::Failed, "{}", state.error);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.unwrap();
+        if external_delete {
+            std::fs::remove_dir_all(&work).unwrap();
+            let failed = tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let current = eng.task(task.id).unwrap();
+                    if current.state == TaskState::Failed { break current; }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }).await.unwrap();
+            assert!(failed.error.contains("外部删除"), "{}", failed.error);
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            assert!(!work.exists(), "subprocess recreated deleted media data");
+            eng.resume(task.id).unwrap();
+            tokio::time::timeout(Duration::from_secs(20), async {
+                loop {
+                    let current = eng.task(task.id).unwrap();
+                    if current.state == TaskState::Completed { break; }
+                    assert_ne!(current.state, TaskState::Failed, "{}", current.error);
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }).await.unwrap();
+        } else {
+            eng.remove(task.id, true).await.unwrap();
+            assert!(!work.exists());
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            assert!(!work.exists(), "worker was still alive after remove returned");
+        }
     }
     stop.store(true, Ordering::Relaxed);
     server.join().unwrap();

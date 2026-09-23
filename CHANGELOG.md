@@ -1,3 +1,20 @@
+## 1.3.1 - 2026-09-23
+
+### Fixes
+- Stop downloads when their temporary file or media directory is deleted in Finder or another file manager
+- Wait for download workers and media subprocesses before removing or restarting tasks
+- Isolate partial data by task ID; resume existing data or restart when it has been deleted
+- Publish completed files without overwriting existing names, including concurrent downloads
+- Preserve existing completed files when removing unfinished tasks with the same name
+
+### Improvements
+- Support Bilibili BV/av video pages, quality selection, individual parts and audio/video merging
+- Use visible `filename.taskID.ddown` files or directories and display their paths in task details
+- Migrate independently owned legacy partial data on upgrade
+
+### Updating
+- Update the desktop app and Chrome extension to 1.3.1, reload the extension and refresh video pages
+
 ## 1.3.0 - 2026-09-23
 
 ### Features

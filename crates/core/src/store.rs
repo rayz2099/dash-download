@@ -268,6 +268,7 @@ impl Store {
                 segments: Vec::new(),
                 created_at: row.get(11)?,
                 completed_at: row.get(12)?,
+                temporary_path: String::new(),
                 max_segments: row.get::<_, i64>(13).unwrap_or(8) as u32,
                 http_status: row.get::<_, i64>(14)? as u16,
                 range_ignored: row.get::<_, i64>(15)? != 0,
@@ -280,6 +281,7 @@ impl Store {
         };
         for t in &mut tasks {
             t.segments = self.load_segments(t.id)?;
+            t.temporary_path = t.part_path().to_string_lossy().into_owned();
         }
         Ok(tasks)
     }

@@ -98,12 +98,15 @@ pub struct TaskInfo {
     pub max_segments: u32,
     pub created_at: i64,
     pub completed_at: Option<i64>,
+    /// Task-owned partial file or media directory, visible while downloading.
+    #[serde(default)]
+    pub temporary_path: String,
 }
 
 impl TaskInfo {
-    /// 下载中的临时文件路径 (完成后 rename 去掉 .ddown 后缀)
+    /// 下载中的临时文件或媒体目录，任务 ID 隔离同名任务；完成后发布为最终文件。
     pub fn part_path(&self) -> std::path::PathBuf {
-        std::path::Path::new(&self.dir).join(format!("{}.ddown", self.name))
+        std::path::Path::new(&self.dir).join(format!("{}.{}.ddown", self.name, self.id))
     }
 
     pub fn final_path(&self) -> std::path::PathBuf {

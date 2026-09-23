@@ -9,6 +9,11 @@
   const seen = new Map();
   function report() {
     const items = [];
+    const page = DDMedia.page(location.href);
+    if (page && document.querySelector('video') && seen.get(page) !== document.title) {
+      seen.set(page, document.title);
+      items.push({ url: page, title: document.title });
+    }
     for (const video of document.querySelectorAll('video')) {
       const title = video.getAttribute('aria-label') || video.title || video.closest('article')?.querySelector('[data-testid="tweetText"]')?.textContent || document.title;
       for (const url of [video.currentSrc, video.src, ...[...video.querySelectorAll('source')].map(s => s.src)]) {

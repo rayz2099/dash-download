@@ -28,3 +28,15 @@ test('detects live and DRM without rejecting ordinary AES-128', () => {
 test('safe names retain the requested extension', () => {
   assert.equal(media.filename('../title:video','mp4'),'.._title_video.mp4');
 });
+
+test('Bilibili video pages use the site extractor, keeping only the selected part', () => {
+  const page = 'https://www.bilibili.com/video/BV1PZ9UBjEsH/?p=2&vd_source=tracking';
+  assert.equal(media.classify(page), 'site');
+  assert.equal(media.page(page), 'https://www.bilibili.com/video/BV1PZ9UBjEsH/?p=2');
+  assert.notEqual(media.key(page), media.key('https://www.bilibili.com/video/BV1PZ9UBjEsH/'));
+  for (const url of ['https://www.bilibili.com.evil.test/video/BV1PZ9UBjEsH/', 'https://live.bilibili.com/123', 'https://www.bilibili.com/video/not-a-video']) {
+    assert.equal(media.page(url), null);
+    assert.equal(media.classify(url), null);
+  }
+  assert.equal(media.classify('https://upos-sz-estghw.bilivideo.com/upgcxcode/36/28/37937742836/37937742836-1-30080.m4s'), null);
+});

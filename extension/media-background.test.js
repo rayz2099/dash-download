@@ -5,7 +5,9 @@ const fs = require('node:fs');
 const DDMedia = require('./media.js');
 function worker(native) {
   const noListener = { addListener() {} };
+  const events = {};
   const context = vm.createContext({
+    events,
     DDMedia, URL, Map, Set, Number, String, Promise, Error, AbortSignal, TextDecoder,
     setTimeout: () => 0, clearTimeout() {}, cached: { enabled: true }, native,
     nativeErr: r => { if (r.ok === false) throw new Error(r.error); return r; },
@@ -15,7 +17,7 @@ function worker(native) {
       storage: { session: { get: async () => ({}), set: async () => {} } },
       tabs: { sendMessage: async () => {}, get: async () => ({ url: 'https://page.test/post/1', title: 'Page title' }), onRemoved: noListener },
       webRequest: { onHeadersReceived: noListener },
-      webNavigation: { onCommitted: noListener, onHistoryStateUpdated: noListener },
+      webNavigation: { onCommitted: noListener, onHistoryStateUpdated: { addListener(fn) { events.history = fn; } } },
       runtime: { onMessage: noListener },
     },
   });
@@ -33,6 +35,17 @@ test('simultaneous clicks add exactly one background task, preserving referrer a
   assert.equal(calls[0].background, true);
   assert.equal(calls[0].name, 'My video.mp4');
   assert.equal(calls[0].headers[0][1], 'https://page.test/post/1');
+});
+
+test('Bilibili SPA navigation replaces the previous video or part without duplicating tracking URLs', async () => {
+  const w = worker(async () => ({}));
+  const first = 'https://www.bilibili.com/video/BV1PZ9UBjEsH/';
+  await w.recordMedia(7, first, '');
+  await w.events.history({ tabId: 7, frameId: 0, url: first + '?p=2' });
+  await w.events.history({ tabId: 7, frameId: 0, url: first + '?p=2&vd_source=tracking' });
+  const state = await w.handleMedia({ type: 'dd-media-list' }, { tab: { id: 7 } });
+  assert.equal(state.resources.length, 1);
+  assert.equal(state.resources[0].sources[0].url, first + '?p=2');
 });
 test('failed handoff remains retryable and foreign resource IDs cannot be submitted', async () => {
   let count = 0;
@@ -62,4 +75,19 @@ test('manifest downloads default to MP4 and honor an explicit MKV choice', async
     assert.equal(task.media.container, container || 'mp4');
     assert.ok(task.name.endsWith('.' + (container || 'mp4')));
   }
+});
+
+test('Bilibili hands the canonical page to the media engine for audio/video merging', async () => {
+  const calls = [];
+  const w = worker(async req => { calls.push(req); return req.op === 'inspect_media' ? { formats: [] } : { id: 9 }; });
+  const page = 'https://www.bilibili.com/video/BV1PZ9UBjEsH/?p=2';
+  await w.recordMedia(7, page + '&vd_source=tracking', '', { title: 'Bilibili video', referrer: page });
+  const state = await w.handleMedia({ type: 'dd-media-list' }, { tab: { id: 7 } });
+  assert.equal(state.resources.length, 1);
+  await w.handleMedia({ type: 'dd-media-download', id: state.resources[0].id }, { tab: { id: 7 } });
+  assert.deepEqual(calls.map(r => r.op), ['inspect_media', 'add_task']);
+  assert.equal(calls[1].url, page);
+  assert.equal(calls[1].media.format, 'bestvideo+bestaudio/best');
+  assert.equal(calls[1].name, 'Bilibili video.mp4');
+  assert.equal(calls[1].headers[0][1], page);
 });

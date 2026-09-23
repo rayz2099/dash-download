@@ -1,6 +1,18 @@
 /* Pure media classification shared by the service worker and tests. */
 (function (root) {
+  // Bilibili uses separate MSE audio/video tracks, not a downloadable MPD.
+  // Give yt-dlp the page so it can refresh signed URLs and pair both tracks.
+  function page(raw) {
+    let u;
+    try { u = new URL(raw); } catch { return null; }
+    if (!['http:', 'https:'].includes(u.protocol) || u.hostname !== 'www.bilibili.com' || u.port || u.username || u.password) return null;
+    const match = u.pathname.match(/^\/video\/(BV[\da-zA-Z]{10}|av\d+)\/?$/);
+    if (!match) return null;
+    const part = u.searchParams.get('p');
+    return `https://www.bilibili.com/video/${match[1]}/` + (part && /^[1-9]\d*$/.test(part) && part !== '1' ? `?p=${part}` : '');
+  }
   function classify(raw, mime = '') {
+    if (page(raw)) return 'site';
     let u;
     try { u = new URL(raw); } catch { return null; }
     if (!['http:', 'https:'].includes(u.protocol)) return null;
@@ -12,6 +24,7 @@
     return null;
   }
   function key(raw) {
+    if (page(raw)) return page(raw);
     const u = new URL(raw);
     // X serves each resolution and playlist under the same media id.
     const x = u.hostname === 'video.twimg.com' && u.pathname.match(/\/(?:ext_tw_video|amplify_video|tweet_video)\/([^/]+)/);
@@ -50,6 +63,6 @@
     const drm = lines.some(l => /^#EXT-X-(?:SESSION-)?KEY:/.test(l) && (/METHOD=SAMPLE-AES/.test(l) || (/KEYFORMAT=/.test(l) && !/KEYFORMAT="identity"/.test(l))));
     return { master, children: children.filter(Boolean), segments: segments.filter(Boolean), unsupported: drm ? 'DRM' : !master && !lines.includes('#EXT-X-ENDLIST') ? 'LIVE' : '' };
   }
-  root.DDMedia = { classify, key, label, filename, manifest };
+  root.DDMedia = { classify, key, label, filename, manifest, page };
   if (typeof module !== 'undefined') module.exports = root.DDMedia;
 })(globalThis);

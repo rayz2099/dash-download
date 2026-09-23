@@ -30,6 +30,7 @@ function publishMedia(tabId) {
 async function recordMedia(tabId, url, mime, meta = {}) {
   await mediaReady;
   if (tabId < 0 || !cached.enabled || typeof url !== "string" || url.length > 8192) return;
+  url = DDMedia.page(url) || url;
   const kind = DDMedia.classify(url, mime);
   if (!kind) return;
   const state = tabState(tabId);
@@ -49,7 +50,7 @@ async function recordMedia(tabId, url, mime, meta = {}) {
     resource.sources = resource.sources.slice(0, 12);
   }
   publishMedia(tabId);
-  if (kind !== "file") readManifest(tabId, resource, url, kind).catch(() => {});
+  if (kind === 'hls' || kind === 'dash') readManifest(tabId, resource, url, kind).catch(() => {});
 }
 async function readManifest(tabId, resource, url, kind) {
   const jobKey = `${tabId}:${url}`;
@@ -103,6 +104,13 @@ chrome.webNavigation.onHistoryStateUpdated.addListener(async d => {
   if (d.frameId !== 0) return;
   // SPA transitions retain loaded resources: a playing video may issue no new request.
   await mediaReady;
+  const page = DDMedia.page(d.url);
+  // A new Bilibili video/part may reuse the same blob and player element.
+  if (page) {
+    const state = tabState(d.tabId);
+    state.resources = state.resources.filter(r => !r.sources.some(s => s.kind === 'site') || r.id === page);
+    await recordMedia(d.tabId, page, '', { referrer: page });
+  }
   publishMedia(d.tabId);
 });
 chrome.tabs.onRemoved.addListener(async id => { await mediaReady; mediaTabs.delete(id); persistMedia(); });

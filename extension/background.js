@@ -1,5 +1,5 @@
 // Takeover: 先把任务交给 app, 成功后再 abort Chrome. 控制面只走 native messaging.
-importScripts("policy.js");
+importScripts("policy.js", "media.js");
 
 const NATIVE = "top.linran.dd";
 /// 只认总开关. 体积阈值和域名黑名单不再进产品面, 旧 storage 里的值忽略.
@@ -187,3 +187,5 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     notify(msg("send_failed"), e && e.message ? e.message : e);
   }
 });
+
+importScripts("media-background.js");

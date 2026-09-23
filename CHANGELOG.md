@@ -1,3 +1,18 @@
+## 1.3.0 - 2026-09-23
+
+### Features
+- Automatically detect loaded web videos, including X and embedded players, in a draggable floating panel
+- Choose quality and download HLS/DASH VOD as MP4 by default, with MKV available
+- Add downloads in the background without focusing the desktop app; manage progress, pause and resume in the app
+- Bundle yt-dlp and FFmpeg with desktop releases
+
+### Improvements
+- Reuse short-lived video metadata to avoid repeated manifest parsing before download
+- Detect unsupported live and DRM streams, prevent duplicate submissions, and show retryable failures
+
+### Updating
+- Update both the desktop app and Chrome extension, then reload the extension and refresh video pages
+
 ## 1.2.8 - 2026-09-08
 
 ### Changes

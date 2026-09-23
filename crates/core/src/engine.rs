@@ -294,6 +294,30 @@ impl Engine {
         Ok(info)
     }
 
+    pub async fn inspect_media(&self, url: &str, ctx: &RequestContext) -> Result<serde_json::Value> {
+        let proxy = self.settings().proxy;
+        crate::media::inspect_with_proxy(url, ctx, &proxy).await
+    }
+
+    pub fn add_media(&self, url: &str, opts: AddTaskOptions, media: crate::media::MediaOptions) -> Result<TaskInfo> {
+        crate::media::validate_format(&media.format)?;
+        let parsed = url::Url::parse(url).map_err(|e| CoreError::Other(e.to_string()))?;
+        if !matches!(parsed.scheme(), "http" | "https") { return Err(CoreError::Other("视频仅支持 HTTP/HTTPS".into())); }
+        let live = self.inner.live.lock().unwrap().clone();
+        let dir = opts.dir.unwrap_or(live.default_dir);
+        let name = sanitize(opts.name.as_deref().unwrap_or("video"));
+        let name = format!("{}.{}", name.trim_end_matches(".mkv").trim_end_matches(".mp4"), media.container.extension());
+        let id = {
+            // Keep the queue row and media discriminator invisible to the scheduler until both exist.
+            let store = self.inner.store.lock().unwrap();
+            store.insert_media_task(url, &dir, &name, &opts.ctx, &media)?
+        };
+        let task = self.inner.task_info(id)?;
+        self.inner.emit(EngineEvent::TaskAdded { task: task.clone() });
+        if !opts.queue_only { self.inner.clone().schedule(); }
+        Ok(task)
+    }
+
     /// 扩展把页面 blob/data 读成字节后直写目标文件.
     /// 不能走 add(): blob: 不是 http, 引擎也无法跨进程 fetch 页面 blob URL.
     pub fn import_bytes(
@@ -345,7 +369,7 @@ impl Engine {
             let running = self.inner.running.lock().unwrap();
             if let Some(r) = running.get(&id) {
                 r.pause_intent.store(true, Ordering::Relaxed);
-                let _ = r.cancel.send(true);
+                let _ = r.cancel.send_replace(true);
                 true
             } else {
                 false
@@ -496,11 +520,19 @@ impl Engine {
     /// 注意: 运行中的管理协程收到 cancel 后可能补写一次过期 checkpoint,
     /// 只影响短暂的显示值, 下次采样即被覆盖, 不做加锁串行化
     pub fn redownload(&self, id: i64) -> Result<()> {
+        let media = self.inner.store.lock().unwrap().load_media(id)?.is_some();
+        if media && self.inner.running.lock().unwrap().contains_key(&id) {
+            return Err(CoreError::Other("请先暂停视频任务，停止后再重新下载".into()));
+        }
+        if media {
+            let info = self.inner.task_info(id)?;
+            let _ = std::fs::remove_dir_all(Path::new(&info.dir).join(format!(".dd-media-{id}")));
+        }
         {
             let mut running = self.inner.running.lock().unwrap();
             if let Some(r) = running.remove(&id) {
                 r.pause_intent.store(false, Ordering::Relaxed);
-                let _ = r.cancel.send(true);
+                let _ = r.cancel.send_replace(true);
             }
         }
         let info = self.inner.task_info(id)?;
@@ -518,7 +550,7 @@ impl Engine {
             let running = self.inner.running.lock().unwrap();
             if let Some(r) = running.get(&id) {
                 r.pause_intent.store(false, Ordering::Relaxed);
-                let _ = r.cancel.send(true);
+                let _ = r.cancel.send_replace(true);
                 true
             } else {
                 false
@@ -543,13 +575,14 @@ impl Engine {
             let mut running = self.inner.running.lock().unwrap();
             if let Some(r) = running.remove(&id) {
                 r.pause_intent.store(false, Ordering::Relaxed);
-                let _ = r.cancel.send(true);
+                let _ = r.cancel.send_replace(true);
             }
         }
         self.inner.store.lock().unwrap().delete_task(id)?;
         if delete_file {
             let _ = std::fs::remove_file(info.part_path());
             let _ = std::fs::remove_file(info.final_path());
+            let _ = std::fs::remove_dir_all(Path::new(&info.dir).join(format!(".dd-media-{id}")));
         }
         self.inner.speeds.lock().unwrap().remove(&id);
         self.inner.emit(EngineEvent::TaskRemoved { id });
@@ -602,27 +635,17 @@ impl Inner {
     /// 队列调度: 只要有空闲额度就拉起最早的 Queued 任务
     fn schedule(self: Arc<Self>) {
         loop {
-            let slots = {
-                let running = self.running.lock().unwrap();
+            let next = {
+                let mut running = self.running.lock().unwrap();
                 let max = self.live.lock().unwrap().max_concurrent as usize;
-                max.saturating_sub(running.len())
+                if running.len() >= max { return; }
+                let store = self.store.lock().unwrap();
+                let next = match store.next_queued() { Ok(Some(id)) => id, _ => return };
+                let (cancel, _) = watch::channel(false);
+                running.insert(next, Running { cancel, pause_intent: Arc::new(AtomicBool::new(false)), segs: Vec::new() });
+                let _ = store.set_state(next, TaskState::Probing, "");
+                next
             };
-            if slots == 0 {
-                return;
-            }
-            let next = match self.store.lock().unwrap().next_queued() {
-                Ok(Some(id)) => id,
-                _ => return,
-            };
-            // 先占坑再 spawn, 防止 schedule 并发重入把同一任务拉起两次
-            let (cancel_tx, _) = watch::channel(false);
-            let placeholder = Running {
-                cancel: cancel_tx,
-                pause_intent: Arc::new(AtomicBool::new(false)),
-                segs: Vec::new(),
-            };
-            self.running.lock().unwrap().insert(next, placeholder);
-            let _ = self.store.lock().unwrap().set_state(next, TaskState::Probing, "");
             tokio::spawn(self.clone().run_task(next));
         }
     }
@@ -632,9 +655,16 @@ impl Inner {
         if let Ok(t) = self.task_info(id) {
             self.emit(EngineEvent::TaskUpdated { task: t });
         }
+        let owner = self.running.lock().unwrap().get(&id).map(|r| r.pause_intent.clone());
         let outcome = self.clone().drive_task(id).await;
+        let ours = {
+            let mut running = self.running.lock().unwrap();
+            let ours = running.get(&id).zip(owner.as_ref()).is_some_and(|(r, owner)| Arc::ptr_eq(&r.pause_intent, owner));
+            if ours { running.remove(&id); }
+            ours
+        };
+        if !ours { return; }
         // 统一收尾: 无论成功失败都释放句柄并推进队列
-        self.running.lock().unwrap().remove(&id);
         self.speeds.lock().unwrap().remove(&id);
         if let Err(e) = outcome {
             // 只把探测失败的状态码写入诊断字段. 分段/单流 HTTP 错误不能盖掉探测结果.
@@ -646,6 +676,40 @@ impl Inner {
         self.clone().schedule();
     }
 
+    async fn drive_media(self: Arc<Self>, info: TaskInfo, ctx: RequestContext, options: crate::media::MediaOptions) -> Result<()> {
+        let id = info.id;
+        let done = Arc::new(AtomicU64::new(0));
+        let (rx, pause) = {
+            let mut running = self.running.lock().unwrap();
+            let Some(r) = running.get_mut(&id) else { return Ok(()); };
+            r.segs = vec![(0, done.clone())];
+            (r.cancel.subscribe(), r.pause_intent.clone())
+        };
+        let work = Path::new(&info.dir).join(format!(".dd-media-{id}"));
+        self.set_state_emit(id, TaskState::Active, "")?;
+        let proxy = self.live.lock().unwrap().proxy.clone();
+        let result = crate::media::download(&info.url, &ctx, &options, &proxy, &work, done.clone(), rx).await?;
+        let ours = self.running.lock().unwrap().get(&id).is_some_and(|r| Arc::ptr_eq(&r.pause_intent, &pause));
+        if !ours { return Ok(()); }
+        if let Some(path) = result {
+            let output_name = format!("{}.{}", info.name.trim_end_matches(".mkv").trim_end_matches(".mp4"), options.container.extension());
+            let final_path = unique_path(Path::new(&info.dir), &output_name);
+            let name = final_path.file_name().unwrap().to_string_lossy().into_owned();
+            let size = std::fs::metadata(&path)?.len();
+            std::fs::rename(path, final_path)?;
+            let _ = std::fs::remove_dir_all(&work);
+            {
+                let mut store = self.store.lock().unwrap();
+                store.update_probe(id, &info.url, &name, Some(size), false, 200, false)?;
+                store.checkpoint(id, size, &[])?;
+            }
+            self.set_state_emit(id, TaskState::Completed, "")?;
+        } else {
+            self.set_state_emit(id, if pause.load(Ordering::Relaxed) { TaskState::Paused } else { TaskState::Canceled }, "")?;
+        }
+        Ok(())
+    }
+
     async fn drive_task(self: Arc<Self>, id: i64) -> Result<()> {
         let (info, ctx) = {
             let store = self.store.lock().unwrap();
@@ -653,6 +717,9 @@ impl Inner {
             let ctx = store.load_ctx(id)?;
             (info, ctx)
         };
+
+        let media = self.store.lock().unwrap().load_media(id)?;
+        if let Some(media) = media { return self.drive_media(info, ctx, media).await; }
 
         // 首跑探测; 续传 (已有分段) 跳过, 复用上次的 final_url 与分段布局
         let info = if info.segments.is_empty() {
@@ -685,28 +752,17 @@ impl Inner {
         };
 
         let file = Arc::new(TaskFile::open(&info.part_path(), info.size)?);
-        let (cancel_tx, cancel_rx) = watch::channel(false);
-        let pause_intent = Arc::new(AtomicBool::new(false));
-        let seg_handles: Vec<(u32, Arc<AtomicU64>)> = info
-            .segments
-            .iter()
-            .map(|s| (s.idx, Arc::new(AtomicU64::new(s.done))))
-            .collect();
-
-        // 替换 schedule() 里的占坑句柄; 若期间已被 remove, 说明任务没了, 直接退出
-        {
+        let seg_handles: Vec<(u32, Arc<AtomicU64>)> = info.segments.iter()
+            .map(|s| (s.idx, Arc::new(AtomicU64::new(s.done)))).collect();
+        let (cancel_rx, pause_intent) = {
             let mut running = self.running.lock().unwrap();
-            if !running.contains_key(&id) {
-                return Ok(());
-            }
-            running.insert(
-                id,
-                Running {
-                    cancel: cancel_tx,
-                    pause_intent: pause_intent.clone(),
-                    segs: seg_handles.clone(),
-                },
-            );
+            let Some(r) = running.get_mut(&id) else { return Ok(()); };
+            r.segs = seg_handles.clone();
+            (r.cancel.subscribe(), r.pause_intent.clone())
+        };
+        if *cancel_rx.borrow() {
+            self.set_state_emit(id, if pause_intent.load(Ordering::Relaxed) { TaskState::Paused } else { TaskState::Canceled }, "")?;
+            return Ok(());
         }
         self.set_state_emit(id, TaskState::Active, "")?;
 
@@ -741,7 +797,7 @@ impl Inner {
                         first_err = Some(e);
                         let running = self.running.lock().unwrap();
                         if let Some(r) = running.get(&id) {
-                            let _ = r.cancel.send(true);
+                            let _ = r.cancel.send_replace(true);
                         }
                     }
                 }

@@ -5,6 +5,7 @@ mod bt;
 mod bt_meta;
 mod bt_sample;
 mod engine;
+pub mod media;
 mod error;
 mod probe;
 mod runner;

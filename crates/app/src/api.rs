@@ -72,6 +72,10 @@ struct AddReq {
     content_b64: Option<String>,
     #[serde(default)]
     mime: Option<String>,
+    #[serde(default)]
+    background: bool,
+    #[serde(default)]
+    media: Option<dd_core::media::MediaOptions>,
 }
 
 #[derive(Deserialize)]
@@ -108,9 +112,9 @@ async fn add_task(ctx: &ApiCtx, req: AddReq) -> Result<Value, String> {
                 headers: req.headers,
             },
         };
-        ctx.engine.add(&req.url, opts).map_err(core)?
+        if let Some(media) = req.media { ctx.engine.add_media(&req.url, opts, media).map_err(core)? } else { ctx.engine.add(&req.url, opts).map_err(core)? }
     };
-    show_main(ctx);
+    if !req.background { show_main(ctx); }
     serde_json::to_value(task).map_err(err)
 }
 
@@ -176,6 +180,10 @@ pub async fn dispatch(ctx: &ApiCtx, req: Value) -> Result<Value, String> {
             Ok(ok())
         }
         "list_tasks" => serde_json::to_value(ctx.engine.list().map_err(core)?).map_err(err),
+        "inspect_media" => {
+            let body: AddReq = serde_json::from_value(req).map_err(err)?;
+            ctx.engine.inspect_media(&body.url, &RequestContext { headers: body.headers }).await.map_err(core)
+        }
         "add_task" => {
             let body: AddReq = serde_json::from_value(req).map_err(err)?;
             add_task(ctx, body).await

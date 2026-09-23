@@ -31,3 +31,6 @@ designs/**/_d_meta.json
 
 # 签名私钥 / 扩展打包密钥, 禁止入库
 .secrets/
+
+# Prepared media sidecars
+crates/app/media-tools/

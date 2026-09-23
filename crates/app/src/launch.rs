@@ -192,14 +192,16 @@ fn gui_exe() -> Result<PathBuf, String> {
     Ok(path)
 }
 
-fn spawn_gui() -> Result<(), String> {
+fn spawn_gui(hidden: bool) -> Result<(), String> {
     let exe = gui_exe()?;
     #[cfg(target_os = "macos")]
     {
         if let Some(bundle) = exe.ancestors().find(|p| p.extension().map(|e| e == "app").unwrap_or(false)) {
-            std::process::Command::new("open")
-                .arg("-a")
+            let mut cmd = std::process::Command::new("open");
+            if hidden { cmd.arg("-g"); }
+            cmd.arg("-a")
                 .arg(bundle)
+                .args(if hidden { vec!["--args", "--hidden"] } else { vec![] })
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
@@ -209,6 +211,7 @@ fn spawn_gui() -> Result<(), String> {
         }
     }
     std::process::Command::new(exe)
+        .args(if hidden { vec!["--hidden"] } else { vec![] })
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -258,15 +261,15 @@ pub fn run_native_host() {
 }
 
 fn forward(req: Value) -> Result<Value, String> {
-    wake()?;
+    wake(req.get("background").and_then(Value::as_bool).unwrap_or(false))?;
     crate::ipc::call(&cfg_dir(), &req)
 }
 
-fn wake() -> Result<(), String> {
+fn wake(hidden: bool) -> Result<(), String> {
     if api_up() {
         return Ok(());
     }
-    spawn_gui()?;
+    spawn_gui(hidden)?;
     let deadline = Instant::now() + Duration::from_secs(12);
     while Instant::now() < deadline {
         if api_up() {

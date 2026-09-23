@@ -75,6 +75,7 @@ impl Store {
             "ALTER TABLE task ADD COLUMN range_ignored INTEGER NOT NULL DEFAULT 0",
             [],
         );
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS media_task (task_id INTEGER PRIMARY KEY, options TEXT NOT NULL);")?;
         Ok(Store { conn })
     }
 
@@ -227,6 +228,7 @@ impl Store {
     }
 
     pub fn delete_task(&self, id: i64) -> Result<()> {
+        self.conn.execute("DELETE FROM media_task WHERE task_id = ?1", params![id])?;
         self.conn.execute("DELETE FROM segment WHERE task_id = ?1", params![id])?;
         self.conn.execute("DELETE FROM task WHERE id = ?1", params![id])?;
         Ok(())
@@ -555,6 +557,24 @@ impl Store {
         Ok(rows)
     }
 
+    pub fn insert_media_task(&self, url: &str, dir: &str, name: &str, ctx: &RequestContext, options: &crate::media::MediaOptions) -> Result<i64> {
+        let tx = self.conn.unchecked_transaction()?;
+        let id = self.insert_task(url, dir, name, TaskState::Queued, ctx, 1)?;
+        self.set_media(id, options)?;
+        tx.commit()?;
+        Ok(id)
+    }
+
+    pub fn set_media(&self, id: i64, options: &crate::media::MediaOptions) -> Result<()> {
+        self.conn.execute("INSERT OR REPLACE INTO media_task (task_id, options) VALUES (?1, ?2)", params![id, serde_json::to_string(options).unwrap()])?;
+        Ok(())
+    }
+
+    pub fn load_media(&self, id: i64) -> Result<Option<crate::media::MediaOptions>> {
+        let raw: Option<String> = self.conn.query_row("SELECT options FROM media_task WHERE task_id = ?1", params![id], |r| r.get(0)).optional()?;
+        raw.map(|s| serde_json::from_str(&s).map_err(|e| crate::CoreError::Other(e.to_string()))).transpose()
+    }
+
     pub fn load_ctx(&self, id: i64) -> Result<RequestContext> {
         let json: String = self.conn.query_row(
             "SELECT headers_json FROM task WHERE id = ?1",
@@ -576,6 +596,25 @@ pub fn now_ts() -> i64 {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn media_options_survive_restart_and_are_removed_with_task() {
+        let path = std::env::temp_dir().join(format!("dd-media-store-{}.sqlite", rand::random::<u64>()));
+        let store = Store::open(&path).unwrap();
+        let id = store.insert_media_task("https://cdn.test/master.m3u8", "/tmp", "movie.mkv", &RequestContext::default(), &crate::media::MediaOptions { container: Default::default(), format: "720+bestaudio/720".into() }).unwrap();
+        store.set_state(id, TaskState::Active, "").unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        store.recover_interrupted().unwrap();
+        assert_eq!(store.get_task(id).unwrap().unwrap().state, TaskState::Paused);
+        assert_eq!(store.load_media(id).unwrap().unwrap().format, "720+bestaudio/720");
+        store.reset_task(id).unwrap();
+        assert!(store.load_media(id).unwrap().is_some());
+        store.delete_task(id).unwrap();
+        assert!(store.load_media(id).unwrap().is_none());
+        drop(store);
+        let _ = std::fs::remove_file(path);
+    }
 
     #[test]
     fn recover_interrupted_pauses_bt_active() {

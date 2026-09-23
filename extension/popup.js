@@ -15,7 +15,7 @@ function renderToggle() {
 }
 
 async function ping() {
-  const info = await chrome.runtime.sendNativeMessage(NATIVE, { op: "ping" });
+  const info = await chrome.runtime.sendNativeMessage(NATIVE, { op: "ping", background: true });
   if (!info || info.ok === false || !info.version) throw new Error(msg("ping_failed"));
   $("dot").classList.add("on");
   $("status").textContent = msg("connected", info.version);
@@ -29,7 +29,7 @@ async function checkHealth() {
   } catch (_) { /* 尝试拉起 */ }
   $("status").textContent = msg("starting_app");
   try {
-    await chrome.runtime.sendNativeMessage(NATIVE, { op: "wake" });
+    await chrome.runtime.sendNativeMessage(NATIVE, { op: "wake", background: true });
     for (let i = 0; i < 40; i++) {
       await new Promise((r) => setTimeout(r, 250));
       try {
@@ -54,3 +54,13 @@ $("toggle").addEventListener("click", () => {
 });
 
 checkHealth();
+
+$("media-open").addEventListener("click", async () => {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id) return;
+  try {
+    await chrome.runtime.sendMessage({ type: 'dd-media-visible', tabId: tab.id, visible: true });
+    await chrome.tabs.sendMessage(tab.id, { type: 'dd-media-open' }, { frameId: 0 });
+    window.close();
+  } catch { $("media-open").textContent = '请刷新普通网页后重试 / Reload the page'; }
+});

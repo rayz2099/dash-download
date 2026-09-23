@@ -87,4 +87,4 @@ test:
     cargo test -p dd-app
     cargo test -p dd-core
     pnpm --dir ui test
-    node --test extension/policy.test.js
+    node --test extension/*.test.js

@@ -44,6 +44,7 @@ The orange badge on the extension card means “Unpacked extension” and is nor
 - Right-click a link → **使用 Dash Download 下载** to send it directly.
 - Use **新建下载** in the app for URLs, magnets, or `.torrent` files.
 - Closing the window keeps downloads running in the tray.
+- Play a web video, then use the floating video button to send it to the app. HLS/DASH VOD downloads default to MP4, with MKV also available. See [video downloads and development setup](docs/video-downloads.md).
 
 Keep the app and extension versions aligned. After replacing the extension files, click **Reload** on `chrome://extensions`.
 
@@ -104,6 +105,7 @@ Keep the app and extension versions aligned. After replacing the extension files
 - 链接右键 → **使用 Dash Download 下载**，可直接发送。
 - 应用内点击**新建下载**，可添加 URL、磁力或 `.torrent`。
 - 关闭窗口后任务继续在托盘运行。
+- 播放网页视频后，点击悬浮视频按钮添加下载；HLS/DASH 点播默认合并成 MP4，也可选择 MKV。详见[视频下载与开发准备](docs/video-downloads.md)。
 
 应用与扩展版本需保持一致。替换扩展文件后，到 `chrome://extensions` 点击**重新加载**。
 

@@ -127,6 +127,15 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm --dir ui install --frozen-lockfile
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Prepare bundled media tools
+        run: |
+          python -m pip install imageio-ffmpeg==0.6.0
+          python scripts/prepare-media-tools.py
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

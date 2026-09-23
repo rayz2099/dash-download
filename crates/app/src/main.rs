@@ -380,7 +380,8 @@ fn main() {
     let builder = tauri::Builder::default();
     // just dev 与托盘里的正式版同 identifier; debug 挂上会被吃掉, 窗口不出现
     #[cfg(not(debug_assertions))]
-    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+        if argv.iter().any(|arg| arg == "--hidden") { return; }
         if let Some(win) = app.get_webview_window("main") {
             let _ = win.show();
             let _ = win.unminimize();
@@ -417,6 +418,12 @@ fn main() {
             let engine = engine.clone();
             move |app| {
             *app_slot.lock().unwrap() = Some(app.handle().clone());
+            if std::env::var_os("DD_MEDIA_TOOLS").is_none() {
+                if let Ok(dir) = app.path().resource_dir() {
+                    let tools = dir.join("media-tools");
+                    if tools.is_dir() { std::env::set_var("DD_MEDIA_TOOLS", tools); }
+                }
+            }
             let auto = if snapshot.auto_start {
                 app.autolaunch().enable()
             } else {

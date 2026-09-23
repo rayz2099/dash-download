@@ -1,4 +1,4 @@
-//! 用 GitHub Releases API 发现版本和带 .sig 的安装包, 再交给 tauri-plugin-updater 验签安装.
+//! 用 GitHub API / 官方 Release 页面发现版本和带 .sig 的安装包，再交给 updater 验签安装.
 //! 有正在跑的 Task 时等到空闲再 install/restart, 避免截断 pwrite.
 
 use crate::gh_update::GH_LATEST;
@@ -221,7 +221,7 @@ fn debug_manual_phase(may_install: bool) -> Option<Phase> {
     }
 }
 
-/// 清单由本机现查 GitHub API 拼出; 原文留给设置页复制.
+/// 清单由本机查询 GitHub API 或官方 Release 页面拼出; 原文留给设置页复制.
 fn explain_check(raw: String) -> String {
     format!("GitHub Releases API ({GH_LATEST}): {raw}")
 }

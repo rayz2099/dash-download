@@ -1,3 +1,13 @@
+## 1.3.2 - 2026-09-23
+
+### Fixes
+- Fall back to the official GitHub release website when update discovery hits API rate limits or API errors
+- Restrict fallback assets to the same repository and release, retaining matching signatures and installation verification
+- Report both discovery errors and a manual download link when neither path is available
+
+### Updating
+- If 1.3.0/1.3.1 cannot check for updates due to API rate limits, install this release manually once
+
 ## 1.3.1 - 2026-09-23
 
 ### Fixes

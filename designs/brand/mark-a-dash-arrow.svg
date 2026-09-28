@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <title>Dash Download — scheme A app master (full-bleed, no pre-rounded corners)</title>
+  <rect width="256" height="256" fill="#2563EB"/>
+  <g fill="none" stroke="#FFFFFF" stroke-width="18" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M48 92h72"/>
+    <path d="M48 128h88"/>
+    <path d="M48 164h72"/>
+    <path d="M168 52v128"/>
+    <path d="M118 124l50 78 50-78"/>
+  </g>
+</svg>

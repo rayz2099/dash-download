@@ -29,6 +29,10 @@ designs/**/_d_meta.json
 # 浏览器自动化快照
 .playwright-mcp/
 
+# 本地 Cursor 规则与临时交接物
+.cursor/
+tmp/
+
 # 签名私钥 / 扩展打包密钥, 禁止入库
 .secrets/
 

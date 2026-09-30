@@ -33,6 +33,19 @@
   }).observe(document, { subtree: true, childList: true, attributes: true, attributeFilter: ['src'] });
   addEventListener('pageshow', report);
   if (window !== window.top) return;
+  if (location.hostname === 'www.xiaohongshu.com') {
+    window.addEventListener('message', event => {
+      if (event.source !== window || event.origin !== location.origin) return;
+      const data = event.data;
+      if (!data || data.source !== 'dd-xhs' || !data.payload) return;
+      const parsed = DDMedia.xhsNote(data.payload, location.href);
+      if (!parsed) return;
+      const sig = JSON.stringify(parsed);
+      if (seen.get(parsed.page) === sig) return;
+      seen.set(parsed.page, sig);
+      send({ type: 'dd-media-found', xhs: data.payload }).catch(() => {});
+    });
+  }
 
   let state = { resources: [], hidden: false }, opened = false, enabled = true;
   const choices = new Map();
@@ -49,6 +62,7 @@
     header{display:flex;align-items:center;gap:8px;padding:14px 16px;border-bottom:1px solid #e7e9ee;cursor:move;touch-action:none;user-select:none}
     header strong{flex:1;font-size:14px}header button{border:0;background:none;color:inherit;font-size:20px;line-height:1;padding:4px}
     .list{max-height:min(440px,55vh);overflow:auto;overscroll-behavior:contain}.empty{padding:24px 16px;color:#737985}
+    .pics{display:flex;flex-direction:column;gap:4px;margin:0 0 8px}.pics label{display:flex;gap:8px;align-items:center;font-size:12px}
     article{padding:14px 16px;border-bottom:1px solid #e7e9ee}article:last-child{border-bottom:0}
     .title{font-weight:600;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
     .meta{font-size:11px;color:#737985;margin:3px 0 10px}.actions{display:flex;gap:8px}select{min-width:0;flex:1;border:1px solid #d9dee7;border-radius:7px;padding:7px;background:#f8f9fb;color:inherit}
@@ -57,7 +71,7 @@
     footer{padding:10px 16px;background:#f8f9fb;color:#737985;font-size:11px}
     [hidden]{display:none!important}
     @media(prefers-color-scheme:dark){:host{color:#f1f3f5}.trigger,.panel{background:#20242b;color:#f1f3f5;border-color:#3d434e}header,article{border-color:#3d434e}select,footer{background:#282d35;color:#bdc4d0;border-color:#3d434e}.meta,.empty{color:#a4aebb}.quality{color:#82aaff}.feedback{color:#ffa28a}}
-  </style><section class="panel" aria-label="${t('视频资源', 'Video resources')}" hidden>
+  </style><section class="panel" aria-label="${t('下载资源', 'Downloads')}" hidden>
     <header><strong>Dash Download</strong><button class="collapse" aria-label="${t('收起', 'Collapse')}">−</button><button class="close" aria-label="${t('隐藏悬浮入口', 'Hide widget')}">×</button></header>
     <div class="list"></div><footer>${t('任务进度在桌面应用中查看', 'Manage downloads in the desktop app')}</footer>
   </section><button class="trigger" aria-expanded="false"></button>`;
@@ -67,16 +81,69 @@
     mount();
     host.style.setProperty('display', enabled && !state.hidden && (state.resources.length || opened) ? 'block' : 'none', 'important');
     panel.hidden = !opened; trigger.setAttribute('aria-expanded', String(opened));
-    trigger.textContent = `↓ ${t('视频', 'Videos')} · ${state.resources.length}`;
+    trigger.textContent = `↓ ${t('媒体', 'Media')} · ${state.resources.length}`;
   }
   function element(tag, className, text) {
     const node = document.createElement(tag); if (className) node.className = className; if (text) node.textContent = text; return node;
   }
+  function noteChoice(resource) {
+    let choice = choices.get(resource.id);
+    if (!choice) { choice = { open: false, pick: new Map(), error: '' }; choices.set(resource.id, choice); }
+    for (const image of resource.images || []) if (image.url && !choice.pick.has(image.n)) choice.pick.set(image.n, true);
+    return choice;
+  }
+  // 默认下全部。展开后的勾选才生效，无水印地址缺失的张不参与。
+  function renderNote(resource) {
+    const article = element('article');
+    const title = resource.title || document.title || t('图片', 'Images');
+    const choice = noteChoice(resource);
+    const images = resource.images || [];
+    const picked = DDMedia.xhsPick(images, choice.open, [...choice.pick].filter(([, on]) => on).map(([n]) => n));
+    const busy = ['added', 'sending'].includes(resource.status);
+    article.append(element('div', 'title', title));
+    article.append(element('div', 'meta', `${images.length} ${t('张', 'images')} · ${t('小红书', 'Xiaohongshu')}`));
+    const broken = images.filter(img => !img.url).length;
+    if (broken) article.append(element('div', 'feedback', t(`${broken} 张无水印原图不可用`, `${broken} without a watermark-free original`)));
+    const toggle = element('button', 'quality', choice.open ? t('收起', 'Collapse') : t('展开', 'Choose'));
+    toggle.disabled = busy;
+    toggle.addEventListener('click', () => { choice.open = !choice.open; render(); });
+    article.append(toggle);
+    if (choice.open) {
+      const pics = element('div', 'pics');
+      for (const image of images) {
+        const label = document.createElement('label');
+        const box = document.createElement('input');
+        box.type = 'checkbox';
+        box.checked = Boolean(image.url) && choice.pick.get(image.n) === true;
+        box.disabled = busy || !image.url;
+        box.addEventListener('change', () => { choice.pick.set(image.n, box.checked); render(); });
+        label.append(box, document.createTextNode(image.url ? `${t('图', 'Image')} ${image.n}${(resource.added || []).includes(image.n) ? t(' · 已添加', ' · added') : ''}` : `${t('图', 'Image')} ${image.n} · ${t('无水印原图不可用', 'no original')}`));
+        pics.append(label);
+      }
+      article.append(pics);
+    }
+    const button = element('button', 'download', resource.status === 'added' ? t('已添加', 'Added') : resource.status === 'sending' ? t('添加中…', 'Adding…') : (choice.open ? t('下载已选', 'Download selected') : t('下载全部', 'Download all')));
+    button.disabled = busy || !picked.length;
+    button.addEventListener('click', async () => {
+      const indexes = DDMedia.xhsPick(images, choice.open, [...choice.pick].filter(([, on]) => on).map(([n]) => n));
+      if (!indexes.length) return;
+      choice.error = ''; button.disabled = true; button.textContent = t('添加中…', 'Adding…');
+      try { await send({ type: 'dd-media-download', id: resource.id, images: indexes, title }); }
+      catch (e) { choice.error = e.message; render(); }
+    });
+    const actions = element('div', 'actions');
+    actions.append(button);
+    article.append(actions);
+    const error = resource.error || choice.error;
+    if (error) { const feedback = element('div', 'feedback', error); feedback.setAttribute('role', 'status'); article.append(feedback); }
+    return article;
+  }
   function render() {
     visibility();
     list.replaceChildren();
-    if (!state.resources.length) { list.append(element('div', 'empty', t('还没有发现视频，请先播放页面上的视频。', 'No videos found yet. Play a video on this page.'))); return; }
+    if (!state.resources.length) { list.append(element('div', 'empty', t('还没有发现可下载的视频或图片。', 'No videos or images yet.'))); return; }
     for (const resource of state.resources) {
+      if (resource.sources.some(s => s.kind === 'images')) { list.append(renderNote(resource)); continue; }
       const article = element('article');
       const title = resource.title || document.title || t('视频', 'Video');
       article.append(element('div', 'title', title));

@@ -40,3 +40,70 @@ test('Bilibili video pages use the site extractor, keeping only the selected par
   }
   assert.equal(media.classify('https://upos-sz-estghw.bilivideo.com/upgcxcode/36/28/37937742836/37937742836-1-30080.m4s'), null);
 });
+
+const xhsId = '6abb25350000000018018728';
+const xhsToken = 'CBLPc7ZFwMneaF--Us_-C3saHSIxtHHpOmEs-9RZzHwew=';
+const xhsPage = `https://www.xiaohongshu.com/explore/${xhsId}?xsec_token=${encodeURIComponent(xhsToken)}`;
+const xhsFile = '1040g3k031qtmfr5pno004a62p2ihj0itmhtlqk0';
+const xhsLive = '1040g2sg31exampleimage00000002';
+function xhsState() {
+  return {
+    note: {
+      noteDetailMap: {
+        [xhsId]: {
+          note: {
+            noteId: xhsId,
+            type: 'normal',
+            title: '示例笔记',
+            imageList: [
+              {
+                traceId: xhsFile,
+                urlDefault: `https://sns-webpic-qc.xhscdn.com/202601131644/e30d294b3ad5957a22d12421fac6da64/notes_pre_post/${xhsFile}!nc_n_webp_mw_1`,
+              },
+              {
+                traceId: xhsLive,
+                urlDefault: `https://sns-webpic-qc.xhscdn.com/202601131644/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/${xhsLive}!nd_dft_wlteh_webp_3`,
+                stream: {
+                  h264: [{ masterUrl: 'https://sns-video-bd.xhscdn.com/stream/1/110/live.mp4', avgBitrate: 100, width: 720, height: 1280 }],
+                  h265: [{ masterUrl: 'https://sns-video-bd.xhscdn.com/stream/1/110/live-h265.mp4', avgBitrate: 900, width: 1080, height: 1920 }],
+                },
+              },
+              { urlDefault: 'https://evil.test/watermark.jpg' },
+            ],
+          },
+        },
+      },
+    },
+  };
+}
+
+test('Xiaohongshu image notes keep the share token and only emit watermark-free originals', () => {
+  const raw = `https://www.xiaohongshu.com/explore/${xhsId}?xsec_token=${xhsToken}&xsec_source=app_share`;
+  assert.equal(media.xhsPage(raw).page, xhsPage);
+  assert.equal(media.xhsPage(`https://www.xiaohongshu.com.evil.test/explore/${xhsId}`), null);
+  assert.equal(media.xhsPage('https://www.xiaohongshu.com/user/profile/abc'), null);
+  const note = media.xhsNote(xhsState(), raw);
+  assert.equal(note.id, xhsId);
+  assert.equal(note.page, xhsPage);
+  assert.equal(note.images.length, 3);
+  assert.equal(note.images[0].url, `https://ci.xiaohongshu.com/notes_pre_post/${xhsFile}`);
+  assert.equal(note.images[1].url, `https://ci.xiaohongshu.com/${xhsLive}`);
+  assert.equal(note.images[2].error, 'nowm');
+  for (const image of note.images) {
+    if (!image.url) continue;
+    assert.equal(media.xhsOriginOk(image.url), true);
+    assert.equal(image.url.includes('!'), false);
+    assert.equal(image.url.includes('imageView'), false);
+    assert.equal(image.url.includes('sns-webpic'), false);
+  }
+  assert.deepEqual(note.videos.map(v => v.url), ['https://sns-video-bd.xhscdn.com/stream/1/110/live-h265.mp4']);
+  assert.equal(media.xhsNote(xhsState(), 'https://www.bilibili.com/video/BV1PZ9UBjEsH/'), null);
+  const videoNote = xhsState();
+  videoNote.note.noteDetailMap[xhsId].note.type = 'video';
+  assert.equal(media.xhsNote(videoNote, raw), null);
+  const images = note.images;
+  assert.deepEqual(media.xhsPick(images, false, []), [1, 2]);
+  assert.deepEqual(media.xhsPick(images, true, [2]), [2]);
+  assert.deepEqual(media.xhsPick(images, true, []), []);
+  assert.equal(media.imageName('示例笔记', 1), '示例笔记-01');
+});

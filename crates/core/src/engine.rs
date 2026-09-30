@@ -1,6 +1,6 @@
 use crate::bt::{self, BtCtl};
 use crate::error::{CoreError, Result};
-use crate::probe::{probe, sanitize};
+use crate::probe::{image_mime_from_magic, probe, sanitize};
 use crate::runner::{plan_segments, replan_remaining, run_segment, run_stream, SegOutcome};
 use crate::settings::{EngineSettings, ProxyCfg, ProxyKind, ProxyProbe, MAX_CONN, MAX_IMPORT_BYTES};
 use crate::store::Store;
@@ -769,7 +769,8 @@ impl Inner {
                 }
                 result = probe(&http, &info.url, &ctx) => result?,
             };
-            let name = if info.name.is_empty() { p.filename.clone() } else { info.name.clone() };
+            let given = if info.name.is_empty() { p.filename.clone() } else { info.name.clone() };
+            let name = finish_image_name(&name_with_type(&given, &p.content_type), &[], &p.final_url, &info.url);
             let segs = match (p.size, p.resumable) {
                 (Some(size), true) if size > 0 => {
                     plan_segments(size, info.max_segments, self.cfg.min_segment_size)
@@ -904,7 +905,10 @@ impl Inner {
         }
         file.sync()?;
         drop(file);
-        let final_path = publish_file(&info.part_path(), Path::new(&info.dir), &info.name)?;
+        // 探测时如果没拿到类型，完成文件的头仍然是准的。先记住临时路径，改名不能换掉它。
+        let part = info.part_path();
+        let name = finish_image_name(&info.name, &read_magic(&part), &info.final_url, &info.url);
+        let final_path = publish_file(&part, Path::new(&info.dir), &name)?;
         let final_name = final_path
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
@@ -988,6 +992,64 @@ async fn sampler_loop(inner: Arc<Inner>) {
     }
 }
 
+/// 响应里的媒体类型。没有可用类型时不在这里补后缀。
+fn name_with_type(name: &str, content_type: &str) -> String {
+    if name_has_ext(name) {
+        return name.to_string();
+    }
+    let ext = mime_ext(content_type);
+    if ext.is_empty() { name.to_string() } else { format!("{name}{ext}") }
+}
+
+fn name_has_ext(name: &str) -> bool {
+    let Some((_, ext)) = name.rsplit_once('.') else { return false; };
+    !ext.is_empty() && ext.len() <= 5 && ext.bytes().all(|b| b.is_ascii_alphanumeric())
+}
+
+/// 还没有后缀时：文件头，其次链接路径里的图片后缀，小红书原图再不行就用 .jpg。
+fn finish_image_name(name: &str, header: &[u8], final_url: &str, url: &str) -> String {
+    if name_has_ext(name) {
+        return name.to_string();
+    }
+    if let Some(ext) = image_mime_from_magic(header).map(mime_ext).filter(|ext| !ext.is_empty()) {
+        return format!("{name}{ext}");
+    }
+    if let Some(ext) = ext_from_url(final_url).or_else(|| ext_from_url(url)) {
+        return format!("{name}{ext}");
+    }
+    if xhs_image_host(final_url) || xhs_image_host(url) {
+        return format!("{name}.jpg");
+    }
+    name.to_string()
+}
+
+fn ext_from_url(url: &str) -> Option<&'static str> {
+    let parsed = url::Url::parse(url).ok()?;
+    let seg = parsed.path_segments()?.filter(|s| !s.is_empty()).last()?;
+    let ext = seg.rsplit_once('.')?.1.to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "jpg" | "jpeg" => ".jpg",
+        "png" => ".png",
+        "webp" => ".webp",
+        "gif" => ".gif",
+        "heic" | "heif" => ".heic",
+        "avif" => ".avif",
+        "bmp" => ".bmp",
+        _ => return None,
+    })
+}
+
+fn xhs_image_host(url: &str) -> bool {
+    url::Url::parse(url).ok().and_then(|u| u.host_str().map(|h| h == "ci.xiaohongshu.com")).unwrap_or(false)
+}
+
+fn read_magic(path: &Path) -> Vec<u8> {
+    let mut buf = [0u8; 32];
+    let Ok(mut file) = std::fs::File::open(path) else { return Vec::new(); };
+    let Ok(n) = std::io::Read::read(&mut file, &mut buf) else { return Vec::new(); };
+    buf[..n].to_vec()
+}
+
 fn import_name(name: Option<String>, mime: Option<&str>) -> String {
     let raw = sanitize(&name.unwrap_or_default());
     let ext = mime_ext(mime.unwrap_or(""));
@@ -1004,6 +1066,8 @@ fn mime_ext(mime: &str) -> &'static str {
         "image/jpeg" | "image/jpg" => ".jpg",
         "image/webp" => ".webp",
         "image/gif" => ".gif",
+        "image/heic" | "image/heif" => ".heic",
+        "image/avif" => ".avif",
         "image/svg+xml" => ".svg",
         "image/bmp" => ".bmp",
         "application/pdf" => ".pdf",
@@ -1096,6 +1160,31 @@ mod tests {
         Engine::new(EngineConfig::new(dir.join("t.db"), dir.join("dl")))
             .await
             .unwrap()
+    }
+
+    #[test]
+    fn extensionless_name_takes_the_response_media_type() {
+        assert_eq!(name_with_type("笔记-01", "image/jpeg"), "笔记-01.jpg");
+        assert_eq!(name_with_type("笔记-01", "image/heic"), "笔记-01.heic");
+        assert_eq!(name_with_type("笔记-01", "image/webp; charset=binary"), "笔记-01.webp");
+        assert_eq!(name_with_type("视频.mp4", "image/jpeg"), "视频.mp4");
+        assert_eq!(name_with_type("笔记-01", "application/octet-stream"), "笔记-01");
+        assert_eq!(name_with_type("hello.world-01", "image/png"), "hello.world-01.png");
+    }
+
+    #[test]
+    fn jpeg_file_header_supplies_the_missing_extension() {
+        // 已下载的「风捻着发尾晃呀晃-09」头就是这个 JPEG。
+        let header = [0xFF, 0xD8, 0xFF, 0xE1, 0x2E, 0xDC, b'E', b'x', b'i', b'f'];
+        let page = "https://ci.xiaohongshu.com/notes_pre_post/1040g3k031qtmfr5pno0";
+        assert_eq!(image_mime_from_magic(&header), Some("image/jpeg"));
+        assert_eq!(finish_image_name("风捻着发尾晃呀晃-09", &header, page, page), "风捻着发尾晃呀晃-09.jpg");
+        assert_eq!(finish_image_name("视频.mp4", &header, page, page), "视频.mp4");
+        assert_eq!(finish_image_name("笔记-01", &[0, 1, 2, 3], page, page), "笔记-01.jpg");
+        assert_eq!(finish_image_name("笔记-01", &[0, 1, 2, 3], "https://cdn.test/a.webp", "https://cdn.test/a.webp"), "笔记-01.webp");
+        assert_eq!(finish_image_name("笔记-01", &[0, 1, 2, 3], "https://cdn.test/file", "https://cdn.test/file"), "笔记-01");
+        let heic = b"\0\0\0\x18ftypheic";
+        assert_eq!(finish_image_name("笔记-02", heic, page, page), "笔记-02.heic");
     }
 
     #[test]

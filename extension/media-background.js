@@ -44,6 +44,7 @@ async function recordMedia(tabId, url, mime, meta = {}) {
   }
   if (meta.title) resource.title = meta.title.slice(0, 200);
   if (meta.referrer) resource.referrer = meta.referrer;
+  if (meta.group) resource.group = meta.group;
   if (!resource.sources.some(s => s.url === url) && !resource.children?.includes(url)) {
     resource.sources.push({ url, kind, label: DDMedia.label(url) });
     resource.sources.sort((a, b) => (a.kind === 'file') - (b.kind === 'file') || parseInt(b.label) - parseInt(a.label));
@@ -51,6 +52,59 @@ async function recordMedia(tabId, url, mime, meta = {}) {
   }
   publishMedia(tabId);
   if (kind === 'hls' || kind === 'dash') readManifest(tabId, resource, url, kind).catch(() => {});
+}
+// 一条图文笔记一个条目。序号由悬浮窗决定，桌面端按无水印原图各建一条任务。
+function recordNote(tabId, note) {
+  const state = tabState(tabId);
+  state.resources = state.resources.filter(r => !r.sources.some(s => s.kind === 'images') || r.id === note.page);
+  let resource = state.resources.find(r => r.id === note.page);
+  if (!resource) {
+    if (state.resources.length >= 50) return;
+    resource = { id: note.page, title: '', referrer: note.page, sources: [], images: [], added: [], status: '', error: '' };
+    state.resources.push(resource);
+  }
+  resource.title = (note.title || '').slice(0, 200);
+  resource.referrer = note.page;
+  resource.images = note.images;
+  resource.sources = [{ url: note.page, kind: 'images', label: String(note.images.length) }];
+  publishMedia(tabId);
+}
+// 序号必须对得上笔记里的原图。带水印的地址即使被改进来也不能提交。
+function selectedImages(resource, request) {
+  const picked = Array.isArray(request.images) ? [...new Set(request.images)] : [];
+  if (!picked.length) throw new Error('没有选中的图片');
+  const todo = [];
+  for (const n of picked) {
+    if (!Number.isInteger(n)) throw new Error('没有选中的图片');
+    const image = (resource.images || []).find(img => img.n === n);
+    if (!image) throw new Error('图片已失效');
+    if (!image.url || !DDMedia.xhsOriginOk(image.url)) throw new Error('无水印原图不可用');
+    todo.push(image);
+  }
+  return todo;
+}
+// 点下载才把桌面窗口拉到前台。读清晰度不走这里，避免人还在网页上选画质时窗口跳出来。
+async function focusApp() {
+  try { await native({ op: 'focus' }); } catch { /* 窗口拉不起来时任务仍要入队 */ }
+}
+async function addImages(resource, images, title, referrer, tabId) {
+  resource.added = resource.added || [];
+  const pending = images.filter(img => !resource.added.includes(img.n));
+  if (pending.length) await focusApp();
+  for (const image of pending) {
+    // Cookie 跟笔记页走。图片域名收不到 www.xiaohongshu.com 上的登录态。
+    nativeErr(await native({
+      op: 'add_task',
+      url: image.url,
+      name: DDMedia.imageName(title, image.n),
+      headers: await buildHeaders(referrer, referrer),
+      background: true,
+    }));
+    resource.added.push(image.n);
+    publishMedia(tabId);
+  }
+  const ready = (resource.images || []).filter(img => img.url);
+  resource.status = ready.length && ready.every(img => resource.added.includes(img.n)) ? 'added' : '';
 }
 async function readManifest(tabId, resource, url, kind) {
   const jobKey = `${tabId}:${url}`;
@@ -105,12 +159,19 @@ chrome.webNavigation.onHistoryStateUpdated.addListener(async d => {
   // SPA transitions retain loaded resources: a playing video may issue no new request.
   await mediaReady;
   const page = DDMedia.page(d.url);
+  const xhs = DDMedia.xhsPage(d.url);
+  const state = tabState(d.tabId);
   // A new Bilibili video/part may reuse the same blob and player element.
   if (page) {
-    const state = tabState(d.tabId);
     state.resources = state.resources.filter(r => !r.sources.some(s => s.kind === 'site') || r.id === page);
     await recordMedia(d.tabId, page, '', { referrer: page });
   }
+  // 离开这条笔记后，图片条目和它带出来的实况视频都不留在列表里。
+  state.resources = state.resources.filter(r => {
+    const images = r.sources.some(s => s.kind === 'images');
+    if (!images && !r.group) return true;
+    return Boolean(xhs) && (images ? r.id === xhs.page : r.group === xhs.page);
+  });
   publishMedia(d.tabId);
 });
 chrome.tabs.onRemoved.addListener(async id => { await mediaReady; mediaTabs.delete(id); persistMedia(); });
@@ -122,8 +183,15 @@ async function handleMedia(request, sender) {
   const state = tabState(tabId);
   if (request.type === 'dd-media-list') return publicState(state);
   if (request.type === 'dd-media-found') {
+    const parsed = request.xhs ? DDMedia.xhsNote(request.xhs, sender.url || '') : null;
+    if (parsed) {
+      recordNote(tabId, parsed);
+      for (const video of parsed.videos) {
+        await recordMedia(tabId, video.url, 'video/mp4', { title: video.title, referrer: parsed.page, group: parsed.page });
+      }
+    }
     for (const item of (request.items || []).slice(0, 100)) {
-      await recordMedia(tabId, item.url, '', { title: item.title, referrer: sender.url });
+      await recordMedia(tabId, item.url, item.mime || '', { title: item.title, referrer: item.referrer || sender.url, group: item.group });
     }
     return { ok: true };
   }
@@ -143,14 +211,20 @@ async function handleMedia(request, sender) {
     const referrer = resource.referrer || tab.url;
     const title = resource.title || request.title || tab.title || 'video';
     if (request.type === 'dd-media-inspect') {
+      if (source.kind === 'images') throw new Error('图片没有清晰度选项');
       if (source.kind === 'file') return { formats: resource.sources.map(s => ({ format: s.url, label: s.label })), direct: true };
       const headers = await buildHeaders(source.url, referrer);
       return nativeErr(await native({ op: 'inspect_media', url: source.url, headers, background: true }));
     }
     if (request.type !== 'dd-media-download') throw new Error('未知资源操作');
     if (resource.status === 'added') return { ok: true };
-    resource.status = 'sending'; resource.phase = source.kind === 'file' ? 'adding' : 'inspecting'; resource.error = ''; publishMedia(tabId);
+    const images = source.kind === 'images' ? selectedImages(resource, request) : null;
+    resource.status = 'sending'; resource.phase = source.kind === 'file' || source.kind === 'images' ? 'adding' : 'inspecting'; resource.error = ''; publishMedia(tabId);
     try {
+      if (images) {
+        await addImages(resource, images, title, referrer, tabId);
+        return { ok: true };
+      }
       let url = source.url;
       if (source.kind === 'file' && request.format) {
         if (!resource.sources.some(s => s.url === request.format)) throw new Error('清晰度已失效');
@@ -166,6 +240,7 @@ async function handleMedia(request, sender) {
       }
       if (source.kind !== 'file') body.media = { format: request.format || 'bestvideo+bestaudio/best', container };
       resource.phase = 'adding'; publishMedia(tabId);
+      await focusApp();
       nativeErr(await native(body));
       resource.status = 'added';
       return { ok: true };

@@ -10,6 +10,8 @@ pub struct ProbeResult {
     /// 服务器是否接受 Range (决定能否分段与续传)
     pub resumable: bool,
     pub filename: String,
+    /// Content-Type 的媒体类型，不含参数。调用方没给文件后缀时用来补上。
+    pub content_type: String,
     pub http_status: u16,
     /// 带 Range 探测却拿到 200, 服务器忽略了 Range
     pub range_ignored: bool,
@@ -27,12 +29,19 @@ pub async fn probe(
     for (k, v) in &ctx.headers {
         req = req.header(k.as_str(), v.as_str());
     }
-    let resp = req.send().await?;
+    let mut resp = req.send().await?;
 
     let status = resp.status();
     let headers = resp.headers().clone();
     let final_url = resp.url().to_string();
-    // 立即 drop resp 中断响应体传输, 探测只要头
+    // 只留文件头。小红书原图经常不给图片类型，JPEG/HEIC 只能从这里认。
+    let mut prefix = [0u8; 32];
+    let mut prefix_len = 0;
+    if let Ok(Some(chunk)) = resp.chunk().await {
+        let n = chunk.len().min(prefix.len());
+        prefix[..n].copy_from_slice(&chunk[..n]);
+        prefix_len = n;
+    }
     drop(resp);
 
     if !status.is_success() {
@@ -59,15 +68,60 @@ pub async fn probe(
     let filename = filename_from_disposition(&headers)
         .or_else(|| filename_from_url(&final_url))
         .unwrap_or_else(|| "download".to_string());
+    let mut content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if opaque_type(&content_type) {
+        if let Some(mime) = image_mime_from_magic(&prefix[..prefix_len]) {
+            content_type = mime.to_string();
+        }
+    }
 
     Ok(ProbeResult {
         final_url,
         size,
         resumable,
         filename: sanitize(&filename),
+        content_type,
         http_status: status.as_u16(),
         range_ignored,
     })
+}
+
+fn opaque_type(t: &str) -> bool {
+    matches!(t, "" | "application/octet-stream" | "binary/octet-stream" | "application/binary")
+}
+
+/// 文件头对应的图片类型。认不出就返回 None，后缀由调用方决定。
+pub(crate) fn image_mime_from_magic(buf: &[u8]) -> Option<&'static str> {
+    if buf.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return Some("image/jpeg");
+    }
+    if buf.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some("image/png");
+    }
+    if buf.starts_with(b"GIF87a") || buf.starts_with(b"GIF89a") {
+        return Some("image/gif");
+    }
+    if buf.len() >= 12 && buf.starts_with(b"RIFF") && &buf[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    if buf.len() >= 12 && &buf[4..8] == b"ftyp" {
+        let brand = &buf[8..12];
+        if matches!(brand, b"avif" | b"avis") {
+            return Some("image/avif");
+        }
+        if matches!(brand, b"heic" | b"heix" | b"hevc" | b"hevx" | b"heim" | b"heis" | b"mif1" | b"msf1") {
+            return Some("image/heic");
+        }
+    }
+    None
 }
 
 /// Content-Disposition 里的 filename*= (RFC 5987) 优先于 filename=

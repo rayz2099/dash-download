@@ -49,6 +49,12 @@
       ],
       "all_frames": true,
       "run_at": "document_start"
+    },
+    {
+      "matches": ["https://www.xiaohongshu.com/*"],
+      "js": ["xhs-hook.js"],
+      "world": "MAIN",
+      "run_at": "document_start"
     }
   ]
 }

@@ -53,23 +53,31 @@ async function recordMedia(tabId, url, mime, meta = {}) {
   publishMedia(tabId);
   if (kind === 'hls' || kind === 'dash') readManifest(tabId, resource, url, kind).catch(() => {});
 }
-// 一条图文笔记一个条目。序号由悬浮窗决定，桌面端按无水印原图各建一条任务。
+// 图片按帖子归集。X 信息流保留多帖，分批加载的照片按固定序号合并。
 function recordNote(tabId, note) {
   const state = tabState(tabId);
-  state.resources = state.resources.filter(r => !r.sources.some(s => s.kind === 'images') || r.id === note.page);
+  if (note.site === 'xhs') state.resources = state.resources.filter(r => !r.sources.some(s => s.kind === 'images') || r.id === note.page);
   let resource = state.resources.find(r => r.id === note.page);
   if (!resource) {
     if (state.resources.length >= 50) return;
     resource = { id: note.page, title: '', referrer: note.page, sources: [], images: [], added: [], status: '', error: '' };
     state.resources.push(resource);
   }
+  resource.site = note.site;
   resource.title = (note.title || '').slice(0, 200);
   resource.referrer = note.page;
-  resource.images = note.images;
-  resource.sources = [{ url: note.page, kind: 'images', label: String(note.images.length) }];
+  if (note.site === 'x') {
+    const images = new Map(resource.images.map(img => [img.n, img]));
+    for (const image of note.images) images.set(image.n, image);
+    resource.images = [...images.values()].sort((a, b) => a.n - b.n);
+    if (resource.status === 'added' && resource.images.some(img => !resource.added.includes(img.n))) resource.status = '';
+  } else {
+    resource.images = note.images;
+  }
+  resource.sources = [{ url: note.page, kind: 'images', label: String(resource.images.length) }];
   publishMedia(tabId);
 }
-// 序号必须对得上笔记里的原图。带水印的地址即使被改进来也不能提交。
+// 下载前按站点重新检查原图地址，内容脚本传来的缩略图不能直接交给桌面端。
 function selectedImages(resource, request) {
   const picked = Array.isArray(request.images) ? [...new Set(request.images)] : [];
   if (!picked.length) throw new Error('没有选中的图片');
@@ -78,7 +86,8 @@ function selectedImages(resource, request) {
     if (!Number.isInteger(n)) throw new Error('没有选中的图片');
     const image = (resource.images || []).find(img => img.n === n);
     if (!image) throw new Error('图片已失效');
-    if (!image.url || !DDMedia.xhsOriginOk(image.url)) throw new Error('无水印原图不可用');
+    const valid = resource.site === 'x' ? image.url && DDMedia.xImage(image.url) === image.url : DDMedia.xhsOriginOk(image.url);
+    if (!valid) throw new Error(resource.site === 'x' ? '原图不可用' : '无水印原图不可用');
     todo.push(image);
   }
   return todo;
@@ -92,14 +101,12 @@ async function addImages(resource, images, title, referrer, tabId) {
   const pending = images.filter(img => !resource.added.includes(img.n));
   if (pending.length) await focusApp();
   for (const image of pending) {
-    // Cookie 跟笔记页走。图片域名收不到 www.xiaohongshu.com 上的登录态。
-    nativeErr(await native({
-      op: 'add_task',
-      url: image.url,
-      name: DDMedia.imageName(title, image.n),
-      headers: await buildHeaders(referrer, referrer),
-      background: true,
-    }));
+    // 小红书原图需要笔记页登录态；X 的 CDN 只带自身 Cookie，不能泄露 X 登录态。
+    const cookieUrl = resource.site === 'x' ? image.url : referrer;
+    const headers = await buildHeaders(cookieUrl, referrer);
+    const name = DDMedia.imageName(title, image.n);
+    const body = { op: 'add_task', url: image.url, name, headers, background: true };
+    nativeErr(await native(body));
     resource.added.push(image.n);
     publishMedia(tabId);
   }
@@ -170,6 +177,7 @@ chrome.webNavigation.onHistoryStateUpdated.addListener(async d => {
   state.resources = state.resources.filter(r => {
     const images = r.sources.some(s => s.kind === 'images');
     if (!images && !r.group) return true;
+    if (images && r.site === 'x') return DDMedia.xSite(d.url);
     return Boolean(xhs) && (images ? r.id === xhs.page : r.group === xhs.page);
   });
   publishMedia(d.tabId);
@@ -183,6 +191,9 @@ async function handleMedia(request, sender) {
   const state = tabState(tabId);
   if (request.type === 'dd-media-list') return publicState(state);
   if (request.type === 'dd-media-found') {
+    if (!cached.enabled) return { ok: true };
+    const post = request.x ? DDMedia.xPost(request.x, sender.url || '') : null;
+    if (post) recordNote(tabId, post);
     const parsed = request.xhs ? DDMedia.xhsNote(request.xhs, sender.url || '') : null;
     if (parsed) {
       recordNote(tabId, parsed);

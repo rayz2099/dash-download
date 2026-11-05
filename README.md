@@ -50,7 +50,7 @@ Download the installer for your OS from [GitHub Releases](https://github.com/ray
 Play a video on any webpage. A floating Dash Download button will appear in the bottom-right corner. Click it to choose your desired resolution and start downloading.
 
 - 📕 **Xiaohongshu (小红书)**: Detects note videos and exports original MP4s with playback authentication.
-- 🐦 **X (Twitter)**: Merges multiple resolutions and audio streams into a single MP4.
+- 🐦 **X (Twitter)**: Merges video resolutions and audio into MP4. Also collects loaded post photos from feeds and detail pages: download all originals or expand to select individual images.
 - 📺 **Bilibili (B站)**: Identifies video pages (including multi-part episodes/分P), muxing separate `.m4s` video and audio tracks into MP4.
 - 🌐 **General Web Videos**: Supports unencrypted MP4, WebM, HLS (`.m3u8`), and DASH VOD streams.
 - ⏳ **More websites**: Continuously being adapted.
@@ -130,7 +130,7 @@ Dash Download 采用分工架构：
 在浏览器中正常播放视频，网页右下角会自动浮现 Dash Download 悬浮按钮。点击展开即可挑选不同清晰度并一键下载为 MP4：
 
 - 📕 **小红书**：自动嗅探图文与视频笔记，一键抓取原画 MP4，自动携带请求上下文，避免 403 权限失效。
-- 🐦 **X (Twitter)**：智能关联归并推文视频的多种画质，免去寻找分段的麻烦，一键导出完整 MP4。
+- 🐦 **X (Twitter)**：归并推文视频的多种画质并导出完整 MP4；同时采集信息流、帖子详情页中已加载的图片，按帖子分组下载原图，支持下载全部或展开勾选。
 - 📺 **Bilibili (B站)**：专项适配普通视频页面（支持多 P 分集选择），自动将分离的 `.m4s` 高清画质与独立音轨混流合并，无需装额外脚本。
 - 🌐 **全网通用网页**：支持大多数采用无 DRM 的 MP4、WebM、HLS (`.m3u8`)、DASH 点播协议的网页视频。
 - ⏳ **更多网站**：持续专项适配与更新中...

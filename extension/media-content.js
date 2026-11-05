@@ -98,10 +98,11 @@
     const title = resource.title || document.title || t('图片', 'Images');
     const choice = noteChoice(resource);
     const images = resource.images || [];
-    const picked = DDMedia.xhsPick(images, choice.open, [...choice.pick].filter(([, on]) => on).map(([n]) => n));
+    const picked = DDMedia.imagePick(images, choice.open, [...choice.pick].filter(([, on]) => on).map(([n]) => n));
     const busy = ['added', 'sending'].includes(resource.status);
     article.append(element('div', 'title', title));
-    article.append(element('div', 'meta', `${images.length} ${t('张', 'images')} · ${t('小红书', 'Xiaohongshu')}`));
+    const site = resource.site === 'x' ? 'X (Twitter)' : t('小红书', 'Xiaohongshu');
+    article.append(element('div', 'meta', `${images.length} ${t('张', 'images')} · ${site}`));
     const broken = images.filter(img => !img.url).length;
     if (broken) article.append(element('div', 'feedback', t(`${broken} 张无水印原图不可用`, `${broken} without a watermark-free original`)));
     const toggle = element('button', 'quality', choice.open ? t('收起', 'Collapse') : t('展开', 'Choose'));
@@ -125,7 +126,7 @@
     const button = element('button', 'download', resource.status === 'added' ? t('已添加', 'Added') : resource.status === 'sending' ? t('添加中…', 'Adding…') : (choice.open ? t('下载已选', 'Download selected') : t('下载全部', 'Download all')));
     button.disabled = busy || !picked.length;
     button.addEventListener('click', async () => {
-      const indexes = DDMedia.xhsPick(images, choice.open, [...choice.pick].filter(([, on]) => on).map(([n]) => n));
+      const indexes = DDMedia.imagePick(images, choice.open, [...choice.pick].filter(([, on]) => on).map(([n]) => n));
       if (!indexes.length) return;
       choice.error = ''; button.disabled = true; button.textContent = t('添加中…', 'Adding…');
       try { await send({ type: 'dd-media-download', id: resource.id, images: indexes, title }); }

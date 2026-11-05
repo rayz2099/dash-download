@@ -95,6 +95,57 @@ test('Bilibili hands the canonical page to the media engine for audio/video merg
   assert.equal(calls[2].headers[0][1], page);
 });
 
+test('X images merge across feed and detail views, download selected originals and keep CDN cookies scoped', async () => {
+  const calls = [];
+  const w = worker(async req => { calls.push(req); return { id: calls.length }; });
+  const sender = { tab: { id: 7 }, url: 'https://x.com/home' };
+  const post = { page: 'https://x.com/test/status/100', title: '图片帖', images: [{ n: 2, url: 'https://pbs.twimg.com/media/Two?format=png&name=small' }] };
+  await w.handleMedia({ type: 'dd-media-found', x: post }, sender);
+  const id = 'https://x.com/i/web/status/100';
+  const request = { type: 'dd-media-download', id, images: [2] };
+  await Promise.all([w.handleMedia(request, sender), w.handleMedia(request, sender)]);
+  assert.deepEqual(calls.map(r => r.op), ['focus', 'add_task']);
+  assert.equal(calls[1].url, 'https://pbs.twimg.com/media/Two?format=png&name=orig');
+  assert.equal(calls[1].name, '图片帖-02');
+  assert.equal(calls[1].media, undefined);
+  assert.deepEqual(w.events.headers, [calls[1].url, id]);
+  await w.handleMedia({ type: 'dd-media-found', x: { ...post, images: [{ n: 1, url: 'https://pbs.twimg.com/media/One.jpg' }] } }, sender);
+  await w.handleMedia({ type: 'dd-media-found', x: { ...post, page: 'https://twitter.com/other/status/200' } }, sender);
+  await w.events.history({ tabId: 7, frameId: 0, url: post.page + '/photo/1' });
+  let state = await w.handleMedia({ type: 'dd-media-list' }, sender);
+  assert.equal(state.resources.length, 2);
+  const resource = state.resources.find(r => r.id === id);
+  assert.equal(resource.status, '');
+  assert.deepEqual(Array.from(resource.images, img => img.n), [1, 2]);
+  await w.handleMedia({ ...request, images: [1, 2] }, sender);
+  assert.deepEqual(calls.map(r => r.op), ['focus', 'add_task', 'focus', 'add_task']);
+  assert.equal(calls[3].url, 'https://pbs.twimg.com/media/One?format=jpg&name=orig');
+  await w.events.history({ tabId: 7, frameId: 0, url: 'https://other.test/' });
+  state = await w.handleMedia({ type: 'dd-media-list' }, sender);
+  assert.equal(state.resources.length, 0);
+});
+
+test('X collection rejects foreign senders, disabled collection and altered original URLs', async () => {
+  const calls = [];
+  const w = worker(async req => { calls.push(req); return {}; });
+  const post = { page: 'https://x.com/test/status/100', images: [{ n: 1, url: 'https://pbs.twimg.com/media/One.jpg' }] };
+  const sender = { tab: { id: 7 }, url: 'https://evil.test/' };
+  const found = { type: 'dd-media-found', x: post };
+  await w.handleMedia(found, sender);
+  sender.url = 'https://x.com/home';
+  w.cached.enabled = false;
+  await w.handleMedia(found, sender);
+  let state = await w.handleMedia({ type: 'dd-media-list' }, sender);
+  assert.equal(state.resources.length, 0);
+  w.cached.enabled = true;
+  await w.handleMedia(found, sender);
+  const id = 'https://x.com/i/web/status/100';
+  await assert.rejects(w.handleMedia({ type: 'dd-media-download', id, images: [2] }, sender), /图片已失效/);
+  w.tabState(7).resources[0].images[0].url = 'https://pbs.twimg.com/media/One?format=jpg&name=small';
+  await assert.rejects(w.handleMedia({ type: 'dd-media-download', id, images: [1] }, sender), /原图不可用/);
+  assert.equal(calls.length, 0);
+});
+
 test('Xiaohongshu note downloads only the selected originals and keeps the live clip on the video path', async () => {
   const calls = [];
   const w = worker(async req => { calls.push(req); return { id: calls.length }; });

@@ -187,10 +187,50 @@
       const live = image && typeof image === 'object' ? xhsLive(image) : null;
       if (live) videos.push({ url: live, title: `${title || '图片'} 实况 ${n}` });
     }
-    return { id: loc.id, page: loc.page, title, images, videos };
+    return { site: 'xhs', id: loc.id, page: loc.page, title, images, videos };
+  }
+  // 只信任 X 的正式站点，避免把外站伪造的帖子交给原图下载链路。
+  function xSite(raw) {
+    let u;
+    try { u = new URL(raw); } catch { return false; }
+    return u.protocol === 'https:' && ['x.com', 'www.x.com', 'twitter.com', 'www.twitter.com'].includes(u.hostname) && !u.port && !u.username && !u.password;
+  }
+  function xPage(raw) {
+    if (!xSite(raw)) return null;
+    const u = new URL(raw);
+    const match = u.pathname.match(/^\/(?:[A-Za-z0-9_]{1,15}|i\/web)\/status\/([0-9]+)(?:\/photo\/([1-4]))?\/?$/);
+    if (!match) return null;
+    return { id: match[1], page: `https://x.com/i/web/status/${match[1]}`, n: match[2] ? Number(match[2]) : null };
+  }
+  // 缩略图与原图共用媒体 id；只改明确支持的尺寸参数，不采集头像、卡片或视频封面。
+  function xImage(raw) {
+    let u;
+    try { u = new URL(raw); } catch { return null; }
+    if (u.protocol !== 'https:' || u.hostname !== 'pbs.twimg.com' || u.port || u.username || u.password || u.hash) return null;
+    const match = u.pathname.match(/^\/media\/([A-Za-z0-9_-]+)(?:\.(jpg|jpeg|png|webp|gif)(?::[A-Za-z0-9_]+)?)?$/);
+    if (!match) return null;
+    const format = match[2] || u.searchParams.get('format');
+    if (!['jpg', 'jpeg', 'png', 'webp', 'gif'].includes(format)) return null;
+    return `https://pbs.twimg.com/media/${match[1]}?format=${format}&name=orig`;
+  }
+  // 图片序号来自 /photo/N，保证信息流、详情页重复上报时仍指向同一张图。
+  function xPost(post, pageUrl) {
+    if (!xSite(pageUrl) || !post || typeof post !== 'object') return null;
+    const loc = xPage(post.page);
+    if (!loc || !Array.isArray(post.images)) return null;
+    const images = [];
+    for (const image of post.images.slice(0, 100)) {
+      if (!image || !Number.isInteger(image.n) || image.n < 1 || image.n > 4) continue;
+      const url = xImage(image.url);
+      if (!url || images.some(img => img.n === image.n || img.url === url)) continue;
+      images.push({ n: image.n, url });
+    }
+    if (!images.length) return null;
+    images.sort((a, b) => a.n - b.n);
+    return { site: 'x', id: loc.id, page: loc.page, title: String(post.title || '').trim().slice(0, 200), images };
   }
   // 收起时忽略勾选，展开后只提交仍有原图且被勾上的序号。
-  function xhsPick(images, open, picked) {
+  function imagePick(images, open, picked) {
     const ready = [];
     for (const image of images || []) if (image && image.url) ready.push(image.n);
     if (!open) return ready;
@@ -218,6 +258,6 @@
     const drm = lines.some(l => /^#EXT-X-(?:SESSION-)?KEY:/.test(l) && (/METHOD=SAMPLE-AES/.test(l) || (/KEYFORMAT=/.test(l) && !/KEYFORMAT="identity"/.test(l))));
     return { master, children: children.filter(Boolean), segments: segments.filter(Boolean), unsupported: drm ? 'DRM' : !master && !lines.includes('#EXT-X-ENDLIST') ? 'LIVE' : '' };
   }
-  root.DDMedia = { classify, key, label, filename, imageName, manifest, page, xhsPage, xhsNote, xhsPick, xhsOriginOk };
+  root.DDMedia = { classify, key, label, filename, imageName, manifest, page, xhsPage, xhsNote, imagePick, xhsOriginOk, xSite, xPage, xImage, xPost };
   if (typeof module !== 'undefined') module.exports = root.DDMedia;
 })(globalThis);

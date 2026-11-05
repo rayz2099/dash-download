@@ -45,6 +45,7 @@
       ],
       "js": [
         "media.js",
+        "x-images.js",
         "media-content.js"
       ],
       "all_frames": true,

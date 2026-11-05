@@ -41,6 +41,32 @@ test('Bilibili video pages use the site extractor, keeping only the selected par
   assert.equal(media.classify('https://upos-sz-estghw.bilivideo.com/upgcxcode/36/28/37937742836/37937742836-1-30080.m4s'), null);
 });
 
+test('X photo URLs normalize modern and legacy sizes without accepting other media hosts', () => {
+  const original = 'https://pbs.twimg.com/media/Photo-1?format=jpg&name=orig';
+  for (const url of ['https://pbs.twimg.com/media/Photo-1?format=jpg&name=small', 'https://pbs.twimg.com/media/Photo-1.jpg:large', original]) {
+    assert.equal(media.xImage(url), original);
+  }
+  for (const url of ['https://pbs.twimg.com.evil.test/media/A.jpg', 'https://pbs.twimg.com/profile_images/A.jpg', 'https://pbs.twimg.com/ext_tw_video_thumb/A.jpg', 'https://pbs.twimg.com/media/A?format=html', 'https://pbs.twimg.com/media/A', 'https://user:pass@pbs.twimg.com/media/A.jpg']) {
+    assert.equal(media.xImage(url), null);
+  }
+  assert.equal(media.xPage('https://twitter.com/test/status/123/photo/2?s=20').page, 'https://x.com/i/web/status/123');
+  for (const url of ['https://x.com.evil.test/test/status/123', 'https://x.com/test/status/123/photo/5', 'https://x.com/home', 'https://x.com:8080/test/status/123']) assert.equal(media.xPage(url), null);
+});
+
+test('X posts preserve photo indices, deduplicate repeated links and reject foreign senders', () => {
+  const first = { n: 1, url: 'https://pbs.twimg.com/media/One.jpg' };
+  const second = { n: 2, url: 'https://pbs.twimg.com/media/Two?format=png&name=small' };
+  const post = { page: 'https://x.com/test/status/123/photo/2', title: '图片帖', images: [second, first, first, second, { n: 4, url: 'https://pbs.twimg.com/media/Four.jpg' }] };
+  const parsed = media.xPost(post, 'https://x.com/home');
+  assert.equal(parsed.site, 'x');
+  assert.equal(parsed.page, 'https://x.com/i/web/status/123');
+  assert.deepEqual(parsed.images.map(img => img.n), [1, 2, 4]);
+  assert.deepEqual(media.imagePick(parsed.images, false, []), [1, 2, 4]);
+  assert.deepEqual(media.imagePick(parsed.images, true, [2]), [2]);
+  assert.equal(media.xPost(post, 'https://evil.test'), null);
+  assert.equal(media.xPost({ ...post, images: [{ n: 0, url: first.url }, { n: 5, url: first.url }] }, 'https://x.com'), null);
+});
+
 const xhsId = '6abb25350000000018018728';
 const xhsToken = 'CBLPc7ZFwMneaF--Us_-C3saHSIxtHHpOmEs-9RZzHwew=';
 const xhsPage = `https://www.xiaohongshu.com/explore/${xhsId}?xsec_token=${encodeURIComponent(xhsToken)}`;
@@ -102,8 +128,8 @@ test('Xiaohongshu image notes keep the share token and only emit watermark-free 
   videoNote.note.noteDetailMap[xhsId].note.type = 'video';
   assert.equal(media.xhsNote(videoNote, raw), null);
   const images = note.images;
-  assert.deepEqual(media.xhsPick(images, false, []), [1, 2]);
-  assert.deepEqual(media.xhsPick(images, true, [2]), [2]);
-  assert.deepEqual(media.xhsPick(images, true, []), []);
+  assert.deepEqual(media.imagePick(images, false, []), [1, 2]);
+  assert.deepEqual(media.imagePick(images, true, [2]), [2]);
+  assert.deepEqual(media.imagePick(images, true, []), []);
   assert.equal(media.imageName('示例笔记', 1), '示例笔记-01');
 });
